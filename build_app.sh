@@ -6,6 +6,9 @@ BUILD_CONFIG="${BUILD_CONFIG:-release}"
 APP_NAME="局域网网页终端管理器"
 BUNDLE_ID="local.ryan.lan-web-terminal-manager"
 APP_DIR="$ROOT_DIR/build/${APP_NAME}.app"
+RELEASE_DIR="$ROOT_DIR/release"
+RELEASE_APP_DIR="$RELEASE_DIR/${APP_NAME}.app"
+RELEASE_ZIP="$RELEASE_DIR/${APP_NAME}.app.zip"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
@@ -64,4 +67,11 @@ ${APP_NAME}
 TXT
 
 chmod +x "$MACOS/$APP_NAME"
+
+rm -rf "$RELEASE_APP_DIR" "$RELEASE_ZIP"
+mkdir -p "$RELEASE_DIR"
+cp -R "$APP_DIR" "$RELEASE_APP_DIR"
+ditto -c -k --keepParent "$RELEASE_APP_DIR" "$RELEASE_ZIP"
+
 echo "已构建: $APP_DIR"
+echo "已发布包: $RELEASE_ZIP"

@@ -155,12 +155,23 @@ final class AppState: ObservableObject {
 
     func removeSelected() {
         guard let selected = selectedEndpoint else { return }
-        stop(selected)
-        endpoints.removeAll { $0.id == selected.id }
-        statuses.removeValue(forKey: selected.id)
+        remove(selected)
+    }
+
+    func remove(_ endpoint: WebEndpoint) {
+        stop(endpoint)
+        endpoints.removeAll { $0.id == endpoint.id }
+        statuses.removeValue(forKey: endpoint.id)
         selection = endpoints.first?.id
         save()
-        activity = "已移除：\(selected.name)"
+        activity = "已移除：\(endpoint.name)"
+    }
+
+    func removeEndpoints(at offsets: IndexSet) {
+        for index in offsets.sorted(by: >) {
+            guard endpoints.indices.contains(index) else { continue }
+            remove(endpoints[index])
+        }
     }
 
     func refreshAll() {
@@ -249,7 +260,9 @@ final class AppState: ObservableObject {
             try? FileManager.default.removeItem(atPath: endpoint.pidFile)
             DispatchQueue.main.async {
                 self.isBusy = false
-                self.refresh(endpoint)
+                if self.endpoints.contains(where: { $0.id == endpoint.id }) {
+                    self.refresh(endpoint)
+                }
                 self.activity = "\(endpoint.name)：\(messages.joined(separator: "，"))"
             }
         }
@@ -257,10 +270,30 @@ final class AppState: ObservableObject {
 
     func openSelectedURL() {
         guard let endpoint = selectedEndpoint else { return }
-        let url = "http://127.0.0.1:\(endpoint.port)\(normalizedURLPath(endpoint.urlPath))"
+        guard statuses[endpoint.id]?.running == true else {
+            activity = "服务已停止，请先启动后再打开"
+            return
+        }
+        guard let url = urls(for: endpoint).first else {
+            activity = "没有可用的局域网地址"
+            return
+        }
         if let target = URL(string: url) {
             NSWorkspace.shared.open(target)
             activity = "已打开：\(url)"
+        }
+    }
+
+    func openSelectedLocalURL() {
+        guard let endpoint = selectedEndpoint else { return }
+        guard statuses[endpoint.id]?.running == true else {
+            activity = "服务已停止，请先启动后再打开"
+            return
+        }
+        let url = localURL(for: endpoint)
+        if let target = URL(string: url) {
+            NSWorkspace.shared.open(target)
+            activity = "已打开本机地址：\(url)"
         }
     }
 
@@ -269,9 +302,50 @@ final class AppState: ObservableObject {
         NSWorkspace.shared.open(URL(fileURLWithPath: endpoint.rootPath))
     }
 
+    func chooseHomepage() {
+        guard let endpoint = selectedEndpoint,
+              let endpointIndex = endpoints.firstIndex(where: { $0.id == endpoint.id }) else { return }
+
+        let rootURL = URL(fileURLWithPath: endpoint.rootPath, isDirectory: true)
+        let panel = NSOpenPanel()
+        panel.title = "选择主页"
+        panel.message = "从已选择的网页目录中选择要打开的主页文件。"
+        panel.directoryURL = rootURL
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
+        let rootPath = rootURL.standardizedFileURL.path
+        let selectedPath = selectedURL.standardizedFileURL.path
+        guard selectedPath == rootPath || selectedPath.hasPrefix(rootPath + "/") else {
+            activity = "主页必须位于当前网页目录中"
+            return
+        }
+
+        let relativePath = selectedPath
+            .dropFirst(rootPath.count)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !relativePath.isEmpty else { return }
+
+        endpoints[endpointIndex].urlPath = "/" + relativePath
+        save()
+        refresh(endpoints[endpointIndex])
+        activity = "已选择主页：\(relativePath)"
+    }
+
     func copyURLs() {
         guard let endpoint = selectedEndpoint else { return }
-        let text = urls(for: endpoint).joined(separator: "\n")
+        guard statuses[endpoint.id]?.running == true else {
+            activity = "服务已停止，访问地址暂不可用"
+            return
+        }
+        let urlItems = urls(for: endpoint)
+        guard !urlItems.isEmpty else {
+            activity = "没有可复制的局域网地址"
+            return
+        }
+        let text = urlItems.joined(separator: "\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         activity = "已复制访问地址"
@@ -344,16 +418,52 @@ final class AppState: ObservableObject {
 
     nonisolated private func urls(for endpoint: WebEndpoint) -> [String] {
         let path = normalizedURLPath(endpoint.urlPath)
-        var items = ["http://127.0.0.1:\(endpoint.port)\(path)"]
+        return lanIPs().map { "http://\($0):\(endpoint.port)\(path)" }
+    }
+
+    nonisolated private func localURL(for endpoint: WebEndpoint) -> String {
+        "http://127.0.0.1:\(endpoint.port)\(normalizedURLPath(endpoint.urlPath))"
+    }
+
+    nonisolated private func lanIPs() -> [String] {
+        if let primaryIP = primaryLANIP() {
+            return [primaryIP]
+        }
+
         let ifconfig = Shell.run("/sbin/ifconfig").stdout
         let regex = try? NSRegularExpression(pattern: #"\binet (192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)\b"#)
         let range = NSRange(ifconfig.startIndex..<ifconfig.endIndex, in: ifconfig)
+        var items: [String] = []
         regex?.matches(in: ifconfig, range: range).forEach { match in
             if let ipRange = Range(match.range(at: 1), in: ifconfig) {
-                items.append("http://\(ifconfig[ipRange]):\(endpoint.port)\(path)")
+                items.append(String(ifconfig[ipRange]))
             }
         }
         return Array(dictUnique(items))
+    }
+
+    nonisolated private func primaryLANIP() -> String? {
+        let route = Shell.run("/sbin/route", args: ["-n", "get", "default"]).stdout
+        guard let interfaceLine = route.split(whereSeparator: \.isNewline)
+            .first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("interface:") }) else {
+            return nil
+        }
+
+        let interface = interfaceLine
+            .split(separator: ":", maxSplits: 1)
+            .last?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !interface.isEmpty else { return nil }
+
+        let ip = Shell.run("/usr/sbin/ipconfig", args: ["getifaddr", interface])
+            .stdout
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return isPrivateIPv4(ip) ? ip : nil
+    }
+
+    nonisolated private func isPrivateIPv4(_ value: String) -> Bool {
+        let pattern = #"^(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)$"#
+        return value.range(of: pattern, options: .regularExpression) != nil
     }
 
     nonisolated private func normalizedURLPath(_ path: String) -> String {
@@ -414,15 +524,42 @@ struct ContentView: View {
                 }
             }
         }
+        .onDeleteCommand(perform: state.removeSelected)
     }
 
     private var sidebar: some View {
         VStack(spacing: 0) {
+            HStack {
+                Text("网页终端")
+                    .font(.headline)
+                Spacer()
+                Button(action: state.addEndpoint) {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .help("添加网页终端")
+                Button(action: state.removeSelected) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("删除选中的网页终端")
+                .disabled(state.selectedEndpoint == nil)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             List(selection: $state.selection) {
                 ForEach(state.endpoints) { endpoint in
                     SidebarRow(endpoint: endpoint, status: state.statuses[endpoint.id])
                         .tag(endpoint.id)
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                state.remove(endpoint)
+                            } label: {
+                                Label("删除", systemImage: "trash")
+                            }
+                        }
                 }
+                .onDelete(perform: state.removeEndpoints)
             }
             Divider()
             HStack {
@@ -579,8 +716,25 @@ struct EndpointDetail: View {
                 }
                 GridRow {
                     Text("入口")
-                    TextField("/", text: $endpoint.urlPath)
-                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button(action: state.chooseHomepage) {
+                            HStack {
+                                Image(systemName: "house")
+                                    .foregroundStyle(.secondary)
+                                Text(endpoint.urlPath)
+                                    .font(.system(.body, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Spacer()
+                        Button(action: state.chooseHomepage) {
+                            Label("选择主页", systemImage: "folder")
+                        }
+                    }
                 }
                 GridRow {
                     Text("")
@@ -602,13 +756,33 @@ struct EndpointDetail: View {
     private var urlPanel: some View {
         GroupBox("局域网访问地址") {
             VStack(alignment: .leading, spacing: 8) {
-                ForEach(status.urls, id: \.self) { url in
+                if status.running {
+                    if status.urls.isEmpty {
+                        HStack {
+                            Image(systemName: "wifi.exclamationmark")
+                                .foregroundStyle(.secondary)
+                            Text("没有检测到可用的局域网地址。")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    } else {
+                        ForEach(status.urls, id: \.self) { url in
+                            HStack {
+                                Image(systemName: "link")
+                                    .foregroundStyle(.secondary)
+                                Text(url)
+                                    .font(.system(.body, design: .monospaced))
+                                    .textSelection(.enabled)
+                                Spacer()
+                            }
+                        }
+                    }
+                } else {
                     HStack {
-                        Image(systemName: "link")
+                        Image(systemName: "link.badge.plus")
                             .foregroundStyle(.secondary)
-                        Text(url)
-                            .font(.system(.body, design: .monospaced))
-                            .textSelection(.enabled)
+                        Text("服务停止后地址不可访问，启动后可复制或打开。")
+                            .foregroundStyle(.secondary)
                         Spacer()
                     }
                 }
@@ -616,7 +790,8 @@ struct EndpointDetail: View {
                     Button(action: state.copyURLs) {
                         Label("复制", systemImage: "doc.on.doc")
                     }
-                    Button(action: state.openSelectedURL) {
+                    .disabled(!status.running || status.urls.isEmpty)
+                    Button(action: state.openSelectedLocalURL) {
                         Label("打开本机地址", systemImage: "arrow.up.right.square")
                     }
                     .disabled(!status.running)
