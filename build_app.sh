@@ -9,6 +9,7 @@ APP_DIR="$ROOT_DIR/build/${APP_NAME}.app"
 RELEASE_DIR="$ROOT_DIR/release"
 RELEASE_APP_DIR="$RELEASE_DIR/${APP_NAME}.app"
 RELEASE_ZIP="$RELEASE_DIR/${APP_NAME}.app.zip"
+RELEASE_STABLE_ZIP="$RELEASE_DIR/app.zip"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
@@ -40,7 +41,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>1.0.1</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSApplicationCategoryType</key>
@@ -68,10 +69,12 @@ TXT
 
 chmod +x "$MACOS/$APP_NAME"
 
-rm -rf "$RELEASE_APP_DIR" "$RELEASE_ZIP"
+rm -rf "$RELEASE_APP_DIR" "$RELEASE_ZIP" "$RELEASE_STABLE_ZIP"
 mkdir -p "$RELEASE_DIR"
 cp -R "$APP_DIR" "$RELEASE_APP_DIR"
 ditto -c -k --keepParent "$RELEASE_APP_DIR" "$RELEASE_ZIP"
+cp "$RELEASE_ZIP" "$RELEASE_STABLE_ZIP"
 
 echo "已构建: $APP_DIR"
 echo "已发布包: $RELEASE_ZIP"
+echo "已发布包: $RELEASE_STABLE_ZIP"
