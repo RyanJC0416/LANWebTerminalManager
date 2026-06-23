@@ -1047,7 +1047,7 @@ final class UpdateManager: ObservableObject {
                 return
             }
 
-            guard let asset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".zip") }) else {
+            guard let asset = release.assets.first(where: { $0.name.lowercased() == "app.zip" }) else {
                 showFailure(UpdateError.appBundleMissing(appName), retryAction: .check)
                 return
             }

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>局域网网页终端管理器 Web</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <header class="sidebar-head">
+      <div class="mark">LWM</div>
+      <strong>网页终端</strong>
+      <button id="addEndpoint" class="icon-button" title="添加">+</button>
+      <button id="deleteEndpoint" class="icon-button danger" title="删除">×</button>
+    </header>
+    <div id="endpointList" class="endpoint-list"></div>
+    <footer class="activity" id="activity">准备就绪</footer>
+  </aside>
+
+  <main class="main">
+    <section id="emptyState" class="empty">
+      <div class="empty-icon">LWM</div>
+      <h1>还没有网页终端</h1>
+      <p>添加一个本机网页目录，然后在浏览器里管理局域网访问服务。</p>
+    </section>
+
+    <section id="detail" class="detail hidden">
+      <header class="detail-head">
+        <div>
+          <h1 id="title">网页终端</h1>
+          <p id="rootPath"></p>
+        </div>
+        <div class="actions">
+          <button id="stopButton">停止</button>
+          <button id="startButton" class="primary">启动</button>
+          <button id="openLANButton">打开</button>
+        </div>
+      </header>
+
+      <div class="panel">
+        <h2>服务设置</h2>
+        <div class="grid">
+          <label>名称</label>
+          <input id="nameInput" type="text">
+
+          <label>目录</label>
+          <div class="inline">
+            <input id="pathInput" type="text">
+            <button id="savePathButton">保存</button>
+          </div>
+
+          <label>监听</label>
+          <div class="inline">
+            <select id="hostInput">
+              <option value="0.0.0.0">局域网</option>
+              <option value="127.0.0.1">本机</option>
+            </select>
+            <input id="portInput" type="number" min="1024" max="65535">
+          </div>
+
+          <label>入口</label>
+          <div class="inline">
+            <select id="homepageSelect"></select>
+            <input id="urlPathInput" type="text">
+            <button id="saveHomepageButton">保存</button>
+          </div>
+
+          <span></span>
+          <label class="checkbox">
+            <input id="autoOpenInput" type="checkbox">
+            启动后自动打开
+          </label>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div><span>状态</span><strong id="statusValue">--</strong></div>
+        <div><span>页面</span><strong id="pageCount">--</strong></div>
+        <div><span>PID</span><strong id="pidValue">--</strong></div>
+        <div><span>索引</span><strong id="indexMtime">--</strong></div>
+      </div>
+
+      <div class="panel">
+        <h2>局域网访问地址</h2>
+        <div id="urlList" class="url-list"></div>
+        <div class="row-actions">
+          <button id="copyURLsButton">复制</button>
+          <button id="openLocalButton">打开本机地址</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>维护终端</h2>
+        <div class="inline">
+          <input id="commandInput" type="text" placeholder="例如：python3 -m http.server --help">
+          <button id="runCommandButton">执行</button>
+        </div>
+        <pre id="terminalOutput">选择一个网页目录后，可以在这里执行维护命令。</pre>
+      </div>
+
+      <div class="panel">
+        <h2>服务日志</h2>
+        <pre id="logOutput">暂无日志</pre>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="addDialog">
+    <form method="dialog" class="dialog-body">
+      <h2>添加网页终端</h2>
+      <label>网页目录路径</label>
+      <input id="newRootPath" type="text" placeholder="/Users/ryan/WorkSpace/MyProject/Site">
+      <label>名称</label>
+      <input id="newName" type="text" placeholder="留空则使用目录名">
+      <div class="dialog-actions">
+        <button value="cancel">取消</button>
+        <button id="confirmAdd" value="default" class="primary">添加</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js"></script>
+</body>
+</html>
