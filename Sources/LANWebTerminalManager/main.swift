@@ -175,14 +175,33 @@ final class AppState: ObservableObject {
     }
 
     func refreshAll() {
-        for endpoint in endpoints {
-            refresh(endpoint)
+        let snapshot = endpoints
+        DispatchQueue.global(qos: .utility).async {
+            let results = snapshot.map { endpoint in
+                (endpoint.id, self.status(for: endpoint))
+            }
+            DispatchQueue.main.async {
+                let existingIDs = Set(self.endpoints.map(\.id))
+                for (id, status) in results where existingIDs.contains(id) {
+                    self.statuses[id] = status
+                }
+            }
         }
     }
 
     func refresh(_ endpoint: WebEndpoint) {
+        DispatchQueue.global(qos: .utility).async {
+            let status = self.status(for: endpoint)
+            DispatchQueue.main.async {
+                guard self.endpoints.contains(where: { $0.id == endpoint.id }) else { return }
+                self.statuses[endpoint.id] = status
+            }
+        }
+    }
+
+    nonisolated private func status(for endpoint: WebEndpoint) -> EndpointStatus {
         let pids = listenerPids(port: endpoint.port)
-        statuses[endpoint.id] = EndpointStatus(
+        return EndpointStatus(
             running: !pids.isEmpty || isPortOpen(host: endpoint.host, port: endpoint.port),
             pids: pids,
             urls: urls(for: endpoint),
