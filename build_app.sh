@@ -4,15 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_CONFIG="${BUILD_CONFIG:-release}"
 APP_NAME="局域网网页终端管理器"
+PRODUCT_NAME="LANWebTerminalManager"
 BUNDLE_ID="local.ryan.lan-web-terminal-manager"
-APP_VERSION="1.1.0"
+APP_VERSION="1.2.0"
 APP_DIR="$ROOT_DIR/build/${APP_NAME}.app"
 RELEASE_DIR="$ROOT_DIR/release"
 RELEASE_APP_DIR="$RELEASE_DIR/${APP_NAME}.app"
-RELEASE_ZIP="$RELEASE_DIR/${APP_NAME}.app.zip"
+RELEASE_ZIP="$RELEASE_DIR/${PRODUCT_NAME}-v${APP_VERSION}-macOS.zip"
 RELEASE_STABLE_ZIP="$RELEASE_DIR/app.zip"
-WEB_PACKAGE_DIR="$RELEASE_DIR/LANWebTerminalManager-web"
-WEB_ZIP="$RELEASE_DIR/LANWebTerminalManager-web.zip"
+WEB_PACKAGE_DIR="$RELEASE_DIR/${PRODUCT_NAME}-web"
+WEB_ZIP="$RELEASE_DIR/${PRODUCT_NAME}-v${APP_VERSION}-web.zip"
 WEB_STABLE_ZIP="$RELEASE_DIR/web.zip"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
@@ -82,7 +83,15 @@ chmod +x "$MACOS/$APP_NAME"
 xattr -cr "$APP_DIR" 2>/dev/null || true
 codesign --force --deep --sign - "$APP_DIR"
 
-rm -rf "$RELEASE_APP_DIR" "$RELEASE_ZIP" "$RELEASE_STABLE_ZIP" "$WEB_PACKAGE_DIR" "$WEB_ZIP" "$WEB_STABLE_ZIP"
+rm -rf \
+  "$RELEASE_APP_DIR" \
+  "$RELEASE_DIR/${APP_NAME}.app.zip" \
+  "$RELEASE_DIR/${PRODUCT_NAME}-"*-macOS.zip \
+  "$RELEASE_STABLE_ZIP" \
+  "$WEB_PACKAGE_DIR" \
+  "$RELEASE_DIR/${PRODUCT_NAME}-web.zip" \
+  "$RELEASE_DIR/${PRODUCT_NAME}-"*-web.zip \
+  "$WEB_STABLE_ZIP"
 mkdir -p "$RELEASE_DIR"
 ditto --norsrc --noextattr "$APP_DIR" "$RELEASE_APP_DIR"
 COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc --noextattr "$RELEASE_APP_DIR" "$RELEASE_ZIP"
@@ -91,15 +100,35 @@ cp "$RELEASE_ZIP" "$RELEASE_STABLE_ZIP"
 mkdir -p "$WEB_PACKAGE_DIR"
 ditto --norsrc --noextattr "$ROOT_DIR/Web" "$WEB_PACKAGE_DIR/Web"
 cp "$ROOT_DIR/web_start.sh" "$WEB_PACKAGE_DIR/web_start.sh"
+cp "$ROOT_DIR/web_start.bat" "$WEB_PACKAGE_DIR/web_start.bat"
+cp "$ROOT_DIR/Web/launcher.html" "$WEB_PACKAGE_DIR/index.html"
+cp "$ROOT_DIR/Web/install_macos.sh" "$WEB_PACKAGE_DIR/install_macos.sh"
+cp "$ROOT_DIR/Web/install_windows.ps1" "$WEB_PACKAGE_DIR/install_windows.ps1"
 cat > "$WEB_PACKAGE_DIR/README.md" <<TXT
 # LANWebTerminalManager Web
 
-本地 Web 版局域网网页终端管理器。
+本地 Web 版局域网网页终端管理器，支持 macOS / Windows / Linux。
 
-## 启动
+## 推荐启动
+
+直接打开：
+
+\`\`\`text
+index.html
+\`\`\`
+
+启动页会检查本地服务是否运行。服务完整时会自动进入管理器；服务未运行时会按平台提示安装 Node.js / Python，并提供启动脚本。
+
+## 手动启动
 
 \`\`\`bash
 ./web_start.sh
+\`\`\`
+
+Windows:
+
+\`\`\`bat
+web_start.bat
 \`\`\`
 
 打开：
@@ -114,15 +143,17 @@ http://127.0.0.1:4177
 LWM_PORT=4188 ./web_start.sh
 \`\`\`
 
-Web 版会复用 macOS app 的同一份配置：
+Web 版配置位置：
 
 \`\`\`text
-~/Library/Application Support/LANWebTerminalManager/endpoints.json
+macOS:   ~/Library/Application Support/LANWebTerminalManager/endpoints.json
+Windows: %APPDATA%\\LANWebTerminalManager\\endpoints.json
+Linux:   ~/.config/LANWebTerminalManager/endpoints.json
 \`\`\`
 
 注意：Web 版能执行本机命令，默认只监听 127.0.0.1，不要绑定到公网地址。
 TXT
-chmod +x "$WEB_PACKAGE_DIR/web_start.sh"
+chmod +x "$WEB_PACKAGE_DIR/web_start.sh" "$WEB_PACKAGE_DIR/install_macos.sh"
 COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc --noextattr "$WEB_PACKAGE_DIR" "$WEB_ZIP"
 cp "$WEB_ZIP" "$WEB_STABLE_ZIP"
 

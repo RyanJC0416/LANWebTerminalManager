@@ -10,9 +10,22 @@ const { randomUUID } = require("crypto");
 
 const HOST = process.env.LWM_HOST || "127.0.0.1";
 const PORT = Number(process.env.LWM_PORT || 4177);
-const APP_SUPPORT = path.join(os.homedir(), "Library", "Application Support", "LANWebTerminalManager");
+const PLATFORM = process.platform;
+const IS_WINDOWS = PLATFORM === "win32";
+const IS_MAC = PLATFORM === "darwin";
+const APP_SUPPORT = appSupportDirectory();
 const CONFIG_PATH = path.join(APP_SUPPORT, "endpoints.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
+
+function appSupportDirectory() {
+  if (IS_WINDOWS) {
+    return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "LANWebTerminalManager");
+  }
+  if (IS_MAC) {
+    return path.join(os.homedir(), "Library", "Application Support", "LANWebTerminalManager");
+  }
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "LANWebTerminalManager");
+}
 
 function endpointFiles(endpoint) {
   return {
@@ -33,6 +46,41 @@ function run(command, args = [], options = {}) {
     status: result.status ?? -1,
     stdout: result.stdout || "",
     stderr: result.stderr || result.error?.message || ""
+  };
+}
+
+function commandExists(command) {
+  const probe = IS_WINDOWS ? run("where", [command], { timeout: 3000 }) : run("/usr/bin/which", [command], { timeout: 3000 });
+  return probe.ok && probe.stdout.trim().length > 0;
+}
+
+function pythonCommand() {
+  if (process.env.LWM_PYTHON) return { command: process.env.LWM_PYTHON, args: [] };
+  if (IS_WINDOWS) {
+    if (commandExists("py")) return { command: "py", args: ["-3"] };
+    if (commandExists("python")) return { command: "python", args: [] };
+    if (commandExists("python3")) return { command: "python3", args: [] };
+    return null;
+  }
+  if (commandExists("python3")) return { command: "python3", args: [] };
+  if (commandExists("python")) return { command: "python", args: [] };
+  return null;
+}
+
+function dependencyStatus() {
+  const python = pythonCommand();
+  return {
+    platform: PLATFORM,
+    node: {
+      ok: true,
+      version: process.version
+    },
+    python: {
+      ok: Boolean(python),
+      command: python ? [python.command, ...python.args].join(" ") : null
+    },
+    configPath: CONFIG_PATH,
+    serviceURL: `http://${HOST}:${PORT}`
   };
 }
 
@@ -59,6 +107,7 @@ async function saveEndpoints(endpoints) {
 }
 
 function seedDefaultEndpoints() {
+  if (!IS_MAC) return [];
   const candidates = [
     { name: "DestinyApp", rootPath: "/Users/ryan/WorkSpace/MyProject/DestinyApp", port: 8089, host: "0.0.0.0", urlPath: "/web/", autoOpen: false },
     { name: "战斗设计", rootPath: "/Users/ryan/Perforce/Tools&Docs/DesignDocs/战斗设计", port: 8088, host: "0.0.0.0", urlPath: "/", autoOpen: false }
@@ -74,6 +123,8 @@ function normalizeURLPath(value) {
 }
 
 function listenerPids(port) {
+  if (IS_WINDOWS) return windowsListenerPids(port);
+  if (!fs.existsSync("/usr/sbin/lsof")) return [];
   const result = run("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
   return result.stdout
     .split(/\r?\n/)
@@ -82,6 +133,25 @@ function listenerPids(port) {
     .map((line) => Number(line))
     .filter(Number.isFinite)
     .sort((a, b) => a - b);
+}
+
+function windowsListenerPids(port) {
+  const script = [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `Get-NetTCPConnection -LocalPort ${Number(port)} -State Listen |`,
+    "Select-Object -ExpandProperty OwningProcess"
+  ].join("; ");
+  const result = run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { timeout: 5000 });
+  if (result.ok && result.stdout.trim()) {
+    return [...new Set(result.stdout.split(/\r?\n/).map((line) => Number(line.trim())).filter(Number.isFinite))].sort((a, b) => a - b);
+  }
+
+  const netstat = run("netstat", ["-ano", "-p", "tcp"], { timeout: 5000 });
+  const pattern = new RegExp(`[:.]${Number(port)}\\s+.*LISTENING\\s+(\\d+)`, "i");
+  return [...new Set(netstat.stdout.split(/\r?\n/).map((line) => {
+    const match = line.match(pattern);
+    return match ? Number(match[1]) : null;
+  }).filter(Number.isFinite))].sort((a, b) => a - b);
 }
 
 function pidFromFile(file) {
@@ -95,11 +165,25 @@ function pidFromFile(file) {
 }
 
 function isPortOpen(host, port) {
+  if (listenerPids(port).length > 0) return true;
   const target = host === "0.0.0.0" ? "127.0.0.1" : host;
+  if (IS_WINDOWS) {
+    const result = run("powershell", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      `if ((Test-NetConnection -ComputerName '${target}' -Port ${Number(port)} -InformationLevel Quiet)) { exit 0 } else { exit 1 }`
+    ], { timeout: 5000 });
+    return result.ok;
+  }
+  if (!fs.existsSync("/usr/bin/nc")) return false;
   return run("/usr/bin/nc", ["-z", target, String(port)], { timeout: 2500 }).ok;
 }
 
 function primaryLANIP() {
+  if (IS_WINDOWS) return windowsPrimaryLANIP();
+  if (!IS_MAC) return null;
   const route = run("/sbin/route", ["-n", "get", "default"]);
   const line = route.stdout.split(/\r?\n/).find((item) => item.trim().startsWith("interface:"));
   const iface = line?.split(":").slice(1).join(":").trim();
@@ -110,9 +194,33 @@ function primaryLANIP() {
   return null;
 }
 
+function windowsPrimaryLANIP() {
+  const script = [
+    "$ip = Get-NetIPConfiguration |",
+    "Where-Object { $_.IPv4DefaultGateway -and $_.IPv4Address } |",
+    "ForEach-Object { $_.IPv4Address.IPAddress } |",
+    "Where-Object { $_ -match '^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.)' } |",
+    "Select-Object -First 1",
+    "Write-Output $ip"
+  ].join(" ");
+  const ip = run("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { timeout: 5000 }).stdout.trim();
+  return isPrivateIPv4(ip) ? ip : null;
+}
+
 function lanIPs() {
   const primary = primaryLANIP();
   if (primary) return [primary];
+  if (IS_WINDOWS) {
+    const result = run("powershell", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      "Get-NetIPAddress -AddressFamily IPv4 | Select-Object -ExpandProperty IPAddress"
+    ], { timeout: 5000 });
+    return [...new Set(result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(isPrivateIPv4))];
+  }
+  if (!fs.existsSync("/sbin/ifconfig")) return [];
   const ifconfig = run("/sbin/ifconfig").stdout;
   const matches = ifconfig.match(/\binet (192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+)\b/g) || [];
   return [...new Set(matches.map((item) => item.replace(/^inet /, "")))];
@@ -211,10 +319,12 @@ async function findEndpoint(id) {
 async function startEndpoint(endpoint) {
   if (!fs.existsSync(endpoint.rootPath)) throw new Error(`目录不存在：${endpoint.rootPath}`);
   if (statusFor(endpoint).running) return;
+  const python = pythonCommand();
+  if (!python) throw new Error("未找到 Python。请安装 Python 3 后重试。");
   const files = endpointFiles(endpoint);
   fs.closeSync(fs.openSync(files.logFile, "a"));
   const out = fs.openSync(files.logFile, "a");
-  const child = spawn("/usr/bin/python3", ["-m", "http.server", String(endpoint.port), "--bind", endpoint.host], {
+  const child = spawn(python.command, [...python.args, "-m", "http.server", String(endpoint.port), "--bind", endpoint.host], {
     cwd: endpoint.rootPath,
     detached: true,
     stdio: ["ignore", out, out]
@@ -342,7 +452,9 @@ async function handleAPI(request, response, url) {
       const body = await readJSON(request);
       const command = String(body.command || "").trim();
       if (!command) return sendError(response, 400, "请输入命令");
-      const result = run("/bin/zsh", ["-lc", command], { cwd: endpoint.rootPath, timeout: 60000 });
+      const result = IS_WINDOWS
+        ? run("cmd.exe", ["/d", "/s", "/c", command], { cwd: endpoint.rootPath, timeout: 60000 })
+        : run("/bin/zsh", ["-lc", command], { cwd: endpoint.rootPath, timeout: 60000 });
       send(response, 200, { ...result, output: [result.stdout, result.stderr].filter(Boolean).join("\n") || "(无输出)" });
       return;
     }
@@ -354,6 +466,14 @@ async function handleAPI(request, response, url) {
   }
 
   sendError(response, 404, "未知 API");
+}
+
+async function handleHealth(response) {
+  send(response, 200, {
+    ok: true,
+    name: "LANWebTerminalManager Web",
+    dependencies: dependencyStatus()
+  });
 }
 
 async function serveStatic(response, url) {
@@ -380,7 +500,9 @@ async function serveStatic(response, url) {
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host || `${HOST}:${PORT}`}`);
-    if (url.pathname.startsWith("/api/")) {
+    if (request.method === "GET" && url.pathname === "/api/health") {
+      await handleHealth(response);
+    } else if (url.pathname.startsWith("/api/")) {
       await handleAPI(request, response, url);
     } else {
       await serveStatic(response, url);

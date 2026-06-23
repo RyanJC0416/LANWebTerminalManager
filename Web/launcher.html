@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LANWebTerminalManager Web 启动器</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f6f7f8;
+      color: #15191f;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    main {
+      width: min(760px, 100%);
+      background: white;
+      border: 1px solid #d9dee4;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 18px 48px rgb(0 0 0 / 8%);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .mark {
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgb(0 0 0 / 18%);
+      border-radius: 8px;
+      background: white;
+      color: black;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+    }
+    p {
+      color: #68717d;
+      line-height: 1.6;
+    }
+    .status {
+      margin: 18px 0;
+      padding: 14px;
+      border-radius: 8px;
+      background: #f3f6fa;
+      border: 1px solid #d9dee4;
+    }
+    .ok {
+      color: #16884a;
+      font-weight: 700;
+    }
+    .warn {
+      color: #b35c00;
+      font-weight: 700;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    a,
+    button {
+      min-height: 34px;
+      border: 1px solid #d9dee4;
+      border-radius: 7px;
+      padding: 7px 12px;
+      background: #f3f4f6;
+      color: #15191f;
+      font: inherit;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .primary {
+      border-color: #0f6bff;
+      background: #0f6bff;
+      color: white;
+    }
+    code,
+    pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    pre {
+      white-space: pre-wrap;
+      background: #f7f8fa;
+      border: 1px solid #d9dee4;
+      border-radius: 8px;
+      padding: 12px;
+      overflow: auto;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">
+      <div class="mark">LWM</div>
+      <div>
+        <h1>LANWebTerminalManager Web</h1>
+        <p id="platformLine">正在检测平台...</p>
+      </div>
+    </div>
+
+    <div class="status" id="statusBox">正在检查本地服务 <code>http://127.0.0.1:4177</code>...</div>
+
+    <section id="instructions" hidden>
+      <p>
+        浏览器直接打开 HTML 不能静默安装依赖或启动本机进程。请先安装缺失依赖，然后运行对应启动脚本。
+        服务启动后，本页会自动进入 Web 管理器。
+      </p>
+      <pre id="commandBox"></pre>
+      <div class="actions">
+        <a id="installLink" class="primary" href="#">下载一键安装脚本</a>
+        <button id="copyCommand">复制启动命令</button>
+        <a href="https://nodejs.org/" target="_blank" rel="noreferrer">Node.js 官网</a>
+        <a href="https://www.python.org/downloads/" target="_blank" rel="noreferrer">Python 官网</a>
+        <a href="http://127.0.0.1:4177" target="_blank" rel="noreferrer">打开本地服务</a>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const serviceURL = "http://127.0.0.1:4177";
+    const statusBox = document.getElementById("statusBox");
+    const instructions = document.getElementById("instructions");
+    const commandBox = document.getElementById("commandBox");
+    const installLink = document.getElementById("installLink");
+    const platformLine = document.getElementById("platformLine");
+
+    const ua = navigator.userAgent;
+    const isWindows = /Windows/i.test(ua);
+    const isMac = /Macintosh|Mac OS X/i.test(ua);
+    const platformName = isWindows ? "Windows" : isMac ? "macOS" : "Linux / Unix";
+    platformLine.textContent = `当前平台：${platformName}`;
+
+    const command = isWindows
+      ? "双击 web_start.bat，或在 PowerShell 中运行：\\n.\\\\web_start.bat"
+      : "在终端中进入本目录后运行：\\n./web_start.sh";
+    commandBox.textContent = command;
+    installLink.href = isWindows ? "install_windows.ps1" : "install_macos.sh";
+    installLink.download = isWindows ? "install_windows.ps1" : "install_macos.sh";
+
+    async function checkService() {
+      try {
+        const response = await fetch(`${serviceURL}/api/health`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const deps = data.dependencies || {};
+        if (deps.python && deps.python.ok) {
+          statusBox.innerHTML = `<span class="ok">本地服务已运行，依赖完整。</span><br>正在进入 Web 管理器...`;
+          location.href = serviceURL;
+          return;
+        }
+        statusBox.innerHTML = `<span class="warn">本地服务已运行，但 Python 未检测到。</span><br>请安装 Python 3 后重启服务。`;
+        instructions.hidden = false;
+      } catch {
+        statusBox.innerHTML = `<span class="warn">本地服务尚未运行。</span><br>请安装 Node.js 20+ 和 Python 3，然后运行启动脚本。`;
+        instructions.hidden = false;
+      }
+    }
+
+    document.getElementById("copyCommand").addEventListener("click", async () => {
+      await navigator.clipboard.writeText(commandBox.textContent);
+    });
+
+    checkService();
+    setInterval(checkService, 2500);
+  </script>
+</body>
+</html>

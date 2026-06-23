@@ -18,7 +18,7 @@
 
 Release 下载：
 
-- `app.zip`：macOS app 平台包
+- `LANWebTerminalManager-v版本号-macOS.zip`：macOS app 平台包
 
 构建：
 
@@ -52,12 +52,28 @@ swift run
 
 Release 下载：
 
-- `web.zip`：Web 平台包
+- `LANWebTerminalManager-v版本号-web.zip`：Web 平台包，支持 macOS / Windows / Linux
 
 Web 版使用 Node.js 本地服务提供管理 UI 和 API，默认只监听本机 `127.0.0.1:4177`：
 
+下载并解压 Web 包后，优先打开：
+
+```text
+index.html
+```
+
+启动页会检测本地服务是否已经运行。服务完整时会自动进入管理器；服务未运行时会按平台提示安装 Node.js / Python，并提供启动脚本。
+
+也可以手动启动：
+
 ```bash
 ./web_start.sh
+```
+
+Windows:
+
+```bat
+web_start.bat
 ```
 
 然后打开：
@@ -72,12 +88,14 @@ http://127.0.0.1:4177
 LWM_PORT=4188 ./web_start.sh
 ```
 
-Web 版会复用同一份配置文件，支持添加/删除网页终端、启动/停止服务、选择主页、复制/打开局域网地址、执行维护命令和查看日志。因为它能执行本机命令，默认不要绑定到公网地址。
+Web 版支持添加/删除网页终端、启动/停止服务、选择主页、复制/打开局域网地址、执行维护命令和查看日志。因为它能执行本机命令，默认不要绑定到公网地址。
 
 ## 配置位置
 
 服务列表保存在：
 
 ```text
-~/Library/Application Support/LANWebTerminalManager/endpoints.json
+macOS:   ~/Library/Application Support/LANWebTerminalManager/endpoints.json
+Windows: %APPDATA%\LANWebTerminalManager\endpoints.json
+Linux:   ~/.config/LANWebTerminalManager/endpoints.json
 ```

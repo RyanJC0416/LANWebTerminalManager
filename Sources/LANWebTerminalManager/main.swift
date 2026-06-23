@@ -1047,7 +1047,7 @@ final class UpdateManager: ObservableObject {
                 return
             }
 
-            guard let asset = release.assets.first(where: { $0.name.lowercased() == "app.zip" }) else {
+            guard let asset = release.assets.first(where: Self.isMacOSAppAsset) else {
                 showFailure(UpdateError.appBundleMissing(appName), retryAction: .check)
                 return
             }
@@ -1337,6 +1337,11 @@ final class UpdateManager: ObservableObject {
         return urlError?.code == .timedOut
             || urlError?.code == .cannotConnectToHost
             || urlError?.code == .networkConnectionLost
+    }
+
+    private static func isMacOSAppAsset(_ asset: GitHubReleaseAsset) -> Bool {
+        let name = asset.name.lowercased()
+        return name == "app.zip" || (name.hasSuffix(".zip") && name.contains("-macos"))
     }
 
     private static func releaseTag(from url: URL) -> String? {
