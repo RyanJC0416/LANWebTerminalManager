@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_CONFIG="${BUILD_CONFIG:-release}"
 APP_NAME="局域网网页终端管理器"
 BUNDLE_ID="local.ryan.lan-web-terminal-manager"
+APP_VERSION="1.0.2"
 APP_DIR="$ROOT_DIR/build/${APP_NAME}.app"
 RELEASE_DIR="$ROOT_DIR/release"
 RELEASE_APP_DIR="$RELEASE_DIR/${APP_NAME}.app"
@@ -20,6 +21,11 @@ swift build -c "$BUILD_CONFIG"
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS" "$RESOURCES"
 cp ".build/$BUILD_CONFIG/LANWebTerminalManager" "$MACOS/$APP_NAME"
+
+ICON_TMP="$(mktemp -d /tmp/lwm-icons.XXXXXX)"
+swift tools/generate_icon.swift "$ICON_TMP" >/dev/null
+iconutil -c icns -o "$RESOURCES/AppIcon.icns" "$ICON_TMP/AppIcon.iconset"
+rm -rf "$ICON_TMP"
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -38,10 +44,12 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <string>6.0</string>
   <key>CFBundleName</key>
   <string>${APP_NAME}</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.1</string>
+  <string>${APP_VERSION}</string>
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>LSApplicationCategoryType</key>
@@ -68,11 +76,13 @@ ${APP_NAME}
 TXT
 
 chmod +x "$MACOS/$APP_NAME"
+xattr -cr "$APP_DIR" 2>/dev/null || true
+codesign --force --deep --sign - "$APP_DIR"
 
 rm -rf "$RELEASE_APP_DIR" "$RELEASE_ZIP" "$RELEASE_STABLE_ZIP"
 mkdir -p "$RELEASE_DIR"
-cp -R "$APP_DIR" "$RELEASE_APP_DIR"
-ditto -c -k --keepParent "$RELEASE_APP_DIR" "$RELEASE_ZIP"
+ditto --norsrc --noextattr "$APP_DIR" "$RELEASE_APP_DIR"
+COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc --noextattr "$RELEASE_APP_DIR" "$RELEASE_ZIP"
 cp "$RELEASE_ZIP" "$RELEASE_STABLE_ZIP"
 
 echo "已构建: $APP_DIR"

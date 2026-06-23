@@ -25,6 +25,16 @@
 open "build/局域网网页终端管理器.app"
 ```
 
+## 安装提示
+
+Release 包是本地 ad-hoc 签名，未做 Apple notarization。如果 Safari 下载后 macOS 提示应用“已损坏”或无法验证，先解压并放到 `/Applications`，然后执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/局域网网页终端管理器.app"
+```
+
+再重新打开 app。
+
 也可以直接开发运行：
 
 ```bash

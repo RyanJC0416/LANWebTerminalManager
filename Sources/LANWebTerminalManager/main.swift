@@ -542,6 +542,7 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             HStack {
+                LWMLogoMark(size: 26)
                 Text("网页终端")
                     .font(.headline)
                 Spacer()
@@ -624,6 +625,24 @@ struct ContentView: View {
         } else {
             EmptyStateView()
         }
+    }
+}
+
+struct LWMLogoMark: View {
+    let size: CGFloat
+
+    var body: some View {
+        Text("LWM")
+            .font(.system(size: size * 0.34, weight: .black, design: .default))
+            .foregroundStyle(.black)
+            .tracking(-0.8)
+            .frame(width: size, height: size)
+            .background(Color.white)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.black.opacity(0.18), lineWidth: 1)
+            )
     }
 }
 
