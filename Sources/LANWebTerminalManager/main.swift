@@ -95,6 +95,26 @@ final class AppState: ObservableObject {
 
     private let configURL: URL
     private var timer: Timer?
+    nonisolated private static let noCacheHTTPServerScript = """
+import http.server
+import socketserver
+import sys
+
+class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
+class ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+port = int(sys.argv[1])
+host = sys.argv[2]
+with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
+    httpd.serve_forever()
+"""
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -222,7 +242,26 @@ final class AppState: ObservableObject {
         stop(endpoint)
     }
 
-    func start(_ endpoint: WebEndpoint) {
+    func refreshSelectedAssets() {
+        guard let endpoint = selectedEndpoint else { return }
+        guard statuses[endpoint.id]?.running == true else {
+            refresh(endpoint)
+            activity = "已刷新资产状态：\(endpoint.name)"
+            return
+        }
+
+        isBusy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = self.stopSynchronously(endpoint)
+            Thread.sleep(forTimeInterval: 0.35)
+            DispatchQueue.main.async {
+                self.isBusy = false
+                self.start(endpoint, reason: "已刷新资产")
+            }
+        }
+    }
+
+    func start(_ endpoint: WebEndpoint, reason: String = "已启动") {
         if statuses[endpoint.id]?.running == true {
             activity = "\(endpoint.name) 已在运行"
             return
@@ -237,7 +276,7 @@ final class AppState: ObservableObject {
             do {
                 let pid = try Shell.startDetached(
                     "/usr/bin/python3",
-                    args: ["-m", "http.server", "\(endpoint.port)", "--bind", endpoint.host],
+                    args: ["-c", Self.noCacheHTTPServerScript, "\(endpoint.port)", endpoint.host],
                     cwd: endpoint.rootPath,
                     logPath: endpoint.logFile
                 )
@@ -246,7 +285,7 @@ final class AppState: ObservableObject {
                 DispatchQueue.main.async {
                     self.isBusy = false
                     self.refresh(endpoint)
-                    self.activity = "已启动 \(endpoint.name)，PID \(pid)"
+                    self.activity = "\(reason) \(endpoint.name)，PID \(pid)"
                     if endpoint.autoOpen {
                         self.openSelectedURL()
                     }
@@ -264,19 +303,7 @@ final class AppState: ObservableObject {
     func stop(_ endpoint: WebEndpoint) {
         isBusy = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let filePid = self.pidFromFile(path: endpoint.pidFile)
-            let targets = Set(self.listenerPids(port: endpoint.port) + [filePid].compactMap { $0 })
-            var messages: [String] = []
-            if targets.isEmpty {
-                messages.append("服务未运行")
-            } else {
-                for pid in targets.sorted() {
-                    let result = Shell.run("/bin/kill", args: ["-TERM", "\(pid)"])
-                    messages.append(result.ok ? "已发送关闭信号：\(pid)" : "关闭失败 \(pid)：\(result.stderr)")
-                }
-            }
-            Thread.sleep(forTimeInterval: 0.5)
-            try? FileManager.default.removeItem(atPath: endpoint.pidFile)
+            let messages = self.stopSynchronously(endpoint)
             DispatchQueue.main.async {
                 self.isBusy = false
                 if self.endpoints.contains(where: { $0.id == endpoint.id }) {
@@ -285,6 +312,23 @@ final class AppState: ObservableObject {
                 self.activity = "\(endpoint.name)：\(messages.joined(separator: "，"))"
             }
         }
+    }
+
+    nonisolated private func stopSynchronously(_ endpoint: WebEndpoint) -> [String] {
+        let filePid = pidFromFile(path: endpoint.pidFile)
+        let targets = Set(listenerPids(port: endpoint.port) + [filePid].compactMap { $0 })
+        var messages: [String] = []
+        if targets.isEmpty {
+            messages.append("服务未运行")
+        } else {
+            for pid in targets.sorted() {
+                let result = Shell.run("/bin/kill", args: ["-TERM", "\(pid)"])
+                messages.append(result.ok ? "已发送关闭信号：\(pid)" : "关闭失败 \(pid)：\(result.stderr)")
+            }
+        }
+        Thread.sleep(forTimeInterval: 0.5)
+        try? FileManager.default.removeItem(atPath: endpoint.pidFile)
+        return messages
     }
 
     func openSelectedURL() {
@@ -738,6 +782,10 @@ struct EndpointDetail: View {
                     .truncationMode(.middle)
             }
             Spacer()
+            Button(action: state.refreshSelectedAssets) {
+                Label("刷新资产", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(state.isBusy)
             Button(action: state.stopSelected) {
                 Label("停止", systemImage: "stop.fill")
             }
