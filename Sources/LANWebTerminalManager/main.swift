@@ -284,6 +284,7 @@ private final class RequestResultBox: @unchecked Sendable {
 @MainActor
 final class AppState: ObservableObject {
     @Published var endpoints: [WebEndpoint] = []
+    @Published var receiverSites: [WebEndpoint] = []
     @Published var selection: UUID?
     @Published var statuses: [UUID: EndpointStatus] = [:]
     @Published var activity = "准备就绪"
@@ -336,6 +337,7 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         load()
         loadTargets()
         loadReceiverSettings()
+        reloadReceiverSites()
         if endpoints.isEmpty {
             seedDefaultEndpoints()
         }
@@ -349,7 +351,10 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     var selectedEndpoint: WebEndpoint? {
         guard let selection else { return nil }
-        return endpoints.first { $0.id == selection }
+        if let endpoint = endpoints.first(where: { $0.id == selection }) {
+            return endpoint
+        }
+        return receiverSites.first { $0.id == selection }
     }
 
     var selectedTarget: RemoteTarget? {
@@ -362,7 +367,26 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
     }
 
     var visibleEndpoints: [WebEndpoint] {
-        endpoints.filter { $0.targetID == selectedTargetID }
+        let owned = endpoints.filter { $0.targetID == selectedTargetID }
+        guard selectedTargetID == nil else { return owned }
+        let ownedIDs = Set(owned.map(\.id))
+        let incoming = receiverSites.filter { !ownedIDs.contains($0.id) }
+        return owned + incoming
+    }
+
+    func isReceiverManaged(_ endpoint: WebEndpoint) -> Bool {
+        receiverSites.contains { $0.id == endpoint.id }
+    }
+
+    func reloadReceiverSites() {
+        receiverSites = loadReceiverSites()
+        syncSelectionToVisibleCategory()
+    }
+
+    func refreshLocalView() {
+        reloadReceiverSites()
+        refreshAll()
+        activity = "已刷新本地与接收方站点"
     }
 
     func targetName(for targetID: UUID?) -> String {
@@ -379,12 +403,22 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
     }
 
     func endpointBinding(_ id: UUID) -> Binding<WebEndpoint>? {
-        guard let index = endpoints.firstIndex(where: { $0.id == id }) else { return nil }
+        if let index = endpoints.firstIndex(where: { $0.id == id }) {
+            return Binding(
+                get: { self.endpoints[index] },
+                set: { newValue in
+                    self.endpoints[index] = newValue
+                    self.save()
+                    self.refresh(newValue)
+                }
+            )
+        }
+        guard let index = receiverSites.firstIndex(where: { $0.id == id }) else { return nil }
         return Binding(
-            get: { self.endpoints[index] },
+            get: { self.receiverSites[index] },
             set: { newValue in
-                self.endpoints[index] = newValue
-                self.save()
+                self.receiverSites[index] = newValue
+                self.saveReceiverSites(self.receiverSites)
                 self.refresh(newValue)
             }
         )
@@ -392,6 +426,7 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     func selectLocalTarget() {
         selectedTargetID = nil
+        reloadReceiverSites()
         syncSelectionToVisibleCategory()
         refreshAll()
         activity = "目标已切换：local"
@@ -475,11 +510,16 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
     }
 
     func remove(_ endpoint: WebEndpoint) {
-        stop(endpoint)
-        endpoints.removeAll { $0.id == endpoint.id }
+        stop(endpoint, forceLocal: isReceiverManaged(endpoint))
+        if isReceiverManaged(endpoint) {
+            receiverSites.removeAll { $0.id == endpoint.id }
+            saveReceiverSites(receiverSites)
+        } else {
+            endpoints.removeAll { $0.id == endpoint.id }
+            save()
+        }
         statuses.removeValue(forKey: endpoint.id)
         syncSelectionToVisibleCategory()
-        save()
         activity = "已移除：\(endpoint.name)"
     }
 
@@ -703,11 +743,11 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     func openSelectedURL() {
         guard let endpoint = selectedEndpoint else { return }
-        guard statuses[endpoint.id]?.running == true else {
+        guard let status = statuses[endpoint.id], status.running else {
             activity = "服务已停止，请先启动后再打开"
             return
         }
-        guard let url = urls(for: endpoint).first else {
+        guard let url = status.urls.first ?? urls(for: endpoint).first else {
             activity = "没有可用的局域网地址"
             return
         }
@@ -719,14 +759,23 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     func openSelectedLocalURL() {
         guard let endpoint = selectedEndpoint else { return }
-        guard statuses[endpoint.id]?.running == true else {
+        guard let status = statuses[endpoint.id], status.running else {
             activity = "服务已停止，请先启动后再打开"
             return
         }
-        let url = localURL(for: endpoint)
+        let url: String
+        if selectedTarget != nil {
+            guard let remoteURL = status.urls.first else {
+                activity = "没有可用的访问地址"
+                return
+            }
+            url = remoteURL
+        } else {
+            url = localURL(for: endpoint)
+        }
         if let target = URL(string: url) {
             NSWorkspace.shared.open(target)
-            activity = "已打开本机地址：\(url)"
+            activity = selectedTarget == nil ? "已打开本机地址：\(url)" : "已打开：\(url)"
         }
     }
 
@@ -793,11 +842,11 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     func copyURLs() {
         guard let endpoint = selectedEndpoint else { return }
-        guard statuses[endpoint.id]?.running == true else {
+        guard let status = statuses[endpoint.id], status.running else {
             activity = "服务已停止，访问地址暂不可用"
             return
         }
-        let urlItems = urls(for: endpoint)
+        let urlItems = status.urls.isEmpty ? urls(for: endpoint) : status.urls
         guard !urlItems.isEmpty else {
             activity = "没有可复制的局域网地址"
             return
@@ -1045,6 +1094,7 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
                 guard payload.token == receiverSettings.token else { return Self.jsonResponse(403, ["error": "接收令牌无效"]) }
                 let endpoint = try receiveSite(payload)
                 start(endpoint, forceLocal: true)
+                reloadReceiverSites()
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 return endpointResponse(endpoint)
             }
@@ -1377,6 +1427,11 @@ struct ContentView: View {
                 Text("网页终端")
                     .font(.headline)
                 Spacer()
+                Button(action: state.refreshLocalView) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("刷新本地与接收方站点")
                 Button(action: state.addEndpoint) {
                     Image(systemName: "plus")
                 }
@@ -1396,10 +1451,15 @@ struct ContentView: View {
                 .padding(.bottom, 8)
             List(selection: $state.selection) {
                 ForEach(state.visibleEndpoints) { endpoint in
-                    SidebarRow(endpoint: endpoint, status: state.statuses[endpoint.id])
+                    SidebarRow(
+                        endpoint: endpoint,
+                        status: state.statuses[endpoint.id],
+                        isReceiverManaged: state.isReceiverManaged(endpoint)
+                    )
                         .tag(endpoint.id)
                         .contextMenu {
-                            Menu("转移至分类") {
+                            if !state.isReceiverManaged(endpoint) {
+                                Menu("转移至分类") {
                                 Button {
                                     state.transferEndpoint(endpoint, toTargetID: nil)
                                 } label: {
@@ -1427,9 +1487,10 @@ struct ContentView: View {
                                     } label: {
                                         Label(target.name, systemImage: "server.rack")
                                     }
+                                    }
                                 }
+                                Divider()
                             }
-                            Divider()
                             Button(role: .destructive) {
                                 state.remove(endpoint)
                             } label: {
@@ -1552,6 +1613,7 @@ struct LWMLogoMark: View {
 struct SidebarRow: View {
     let endpoint: WebEndpoint
     let status: EndpointStatus?
+    var isReceiverManaged = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -1559,9 +1621,19 @@ struct SidebarRow: View {
                 .fill(status?.running == true ? Color.green : Color.gray.opacity(0.45))
                 .frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 3) {
-                Text(endpoint.name)
-                    .font(.headline)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(endpoint.name)
+                        .font(.headline)
+                        .lineLimit(1)
+                    if isReceiverManaged {
+                        Text("接收")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.blue.opacity(0.14))
+                            .clipShape(Capsule())
+                    }
+                }
                 Text("\(endpoint.host):\(endpoint.port)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
