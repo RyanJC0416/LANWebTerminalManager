@@ -2173,14 +2173,17 @@ final class UpdateManager: ObservableObject {
 
         let (_, response) = try await URLSession.shared.data(for: request)
         guard let finalURL = response.url,
-              let tag = Self.releaseTag(from: finalURL),
-              let assetURL = URL(string: "https://github.com/RyanJC0416/LANWebTerminalManager/releases/download/\(tag)/app.zip") else {
+              let tag = Self.releaseTag(from: finalURL) else {
+            throw UpdateError.releaseLookupFailed
+        }
+        let assetName = Self.macOSReleaseAssetName(for: tag)
+        guard let assetURL = URL(string: "https://github.com/RyanJC0416/LANWebTerminalManager/releases/download/\(tag)/\(assetName)") else {
             throw UpdateError.releaseLookupFailed
         }
 
         return GitHubRelease(
             tagName: tag,
-            assets: [GitHubReleaseAsset(name: "app.zip", browserDownloadURL: assetURL)]
+            assets: [GitHubReleaseAsset(name: assetName, browserDownloadURL: assetURL)]
         )
     }
 
@@ -2386,7 +2389,12 @@ final class UpdateManager: ObservableObject {
 
     private static func isMacOSAppAsset(_ asset: GitHubReleaseAsset) -> Bool {
         let name = asset.name.lowercased()
-        return name == "app.zip" || (name.hasSuffix(".zip") && name.contains("-macos"))
+        return name.hasSuffix(".zip") && name.contains("-macos")
+    }
+
+    private static func macOSReleaseAssetName(for tag: String) -> String {
+        let version = tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        return "LANWebTerminalManager-v\(version)-macOS.zip"
     }
 
     private static func releaseTag(from url: URL) -> String? {
