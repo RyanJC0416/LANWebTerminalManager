@@ -720,6 +720,30 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         activity = "已选择主页：\(relativePath)"
     }
 
+    func deployTestHTML() {
+        guard let endpoint = selectedEndpoint,
+              let endpointIndex = endpoints.firstIndex(where: { $0.id == endpoint.id }) else { return }
+        guard FileManager.default.fileExists(atPath: endpoint.rootPath) else {
+            activity = "目录不存在：\(endpoint.rootPath)"
+            return
+        }
+
+        let display = selectedTarget == nil ? receiverTestDisplayText() : "等待接收方生成"
+        let html = testHTML(display: display)
+
+        do {
+            let fileURL = URL(fileURLWithPath: endpoint.rootPath, isDirectory: true)
+                .appendingPathComponent("remote-test.html")
+            try html.write(to: fileURL, atomically: true, encoding: .utf8)
+            endpoints[endpointIndex].urlPath = "/remote-test.html"
+            save()
+            refresh(endpoints[endpointIndex])
+            activity = selectedTarget == nil ? "已部署测试页：\(display)" : "已部署测试页模板，接收方会生成实际平台和令牌"
+        } catch {
+            activity = "部署测试页失败：\(error.localizedDescription)"
+        }
+    }
+
     func copyURLs() {
         guard let endpoint = selectedEndpoint else { return }
         guard statuses[endpoint.id]?.running == true else {
@@ -1019,6 +1043,10 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
             guard let data = Data(base64Encoded: file.content) else { continue }
             try data.write(to: targetURL, options: .atomic)
         }
+        if payload.files.contains(where: { $0.path.replacingOccurrences(of: "\\", with: "/") == "remote-test.html" }) {
+            let testURL = rootURL.appendingPathComponent("remote-test.html")
+            try testHTML(display: receiverTestDisplayText()).write(to: testURL, atomically: true, encoding: .utf8)
+        }
         let endpoint = WebEndpoint(
             id: payload.endpoint.id,
             name: payload.endpoint.name,
@@ -1069,6 +1097,62 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         let mapped = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
         let name = String(mapped).trimmingCharacters(in: CharacterSet(charactersIn: "_"))
         return name.isEmpty ? "site" : name
+    }
+
+    private func platformDisplayName(_ value: String) -> String {
+        let lower = value.lowercased()
+        if lower.contains("win") { return "Windows" }
+        if lower.contains("darwin") || lower.contains("mac") { return "macOS" }
+        if lower.contains("linux") { return "Linux" }
+        return "Unknown"
+    }
+
+    private func receiverTestDisplayText() -> String {
+        let token = receiverSettings.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(currentPlatformDisplayName()) + \(token.isEmpty ? "未设置接收令牌" : token)"
+    }
+
+    private func currentPlatformDisplayName() -> String {
+        #if os(macOS)
+        return "macOS"
+        #else
+        return "Unknown"
+        #endif
+    }
+
+    private func testHTML(display: String) -> String {
+        """
+        <!doctype html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>LWM Remote Test</title>
+          <style>
+            body {
+              min-height: 100vh;
+              margin: 0;
+              display: grid;
+              place-items: center;
+              background: #f5f7fa;
+              color: #111827;
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }
+            h1 {
+              max-width: 90vw;
+              margin: 0;
+              font-size: clamp(36px, 9vw, 88px);
+              line-height: 1.05;
+              text-align: center;
+              word-break: break-word;
+            }
+          </style>
+        </head>
+        <body>
+          <h1>\(display.htmlEscaped)</h1>
+        </body>
+        </html>
+        """
     }
 
     private func endpointResponse(_ endpoint: WebEndpoint) -> (Int, Data) {
@@ -1529,6 +1613,9 @@ struct EndpointDetail: View {
                         }
                         .buttonStyle(.plain)
                         Spacer()
+                        Button(action: state.deployTestHTML) {
+                            Label("部署测试页", systemImage: "bolt.badge.checkmark")
+                        }
                         Button(action: state.chooseHomepage) {
                             Label("选择主页", systemImage: "folder")
                         }
@@ -2431,6 +2518,14 @@ extension String {
 
     var urlQueryEscaped: String {
         addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? self
+    }
+
+    var htmlEscaped: String {
+        replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 }
 
