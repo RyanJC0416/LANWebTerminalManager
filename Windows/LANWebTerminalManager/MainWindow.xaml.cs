@@ -82,8 +82,42 @@ public partial class MainWindow : Window
         });
         _updateManager.UpdateReadyToInstall += () => System.Windows.Application.Current.Shutdown();
         ActivityText.Text = _state.Activity;
+        RefreshTargetPicker();
         RenderDetail();
         RefreshEndpointListVisuals();
+    }
+
+    private sealed class TargetPickerItem
+    {
+        public required string Label { get; init; }
+        public Guid? TargetId { get; init; }
+        public override string ToString() => Label;
+    }
+
+    private void RefreshTargetPicker()
+    {
+        var items = new List<TargetPickerItem> { new() { Label = "local", TargetId = null } };
+        items.AddRange(_state.Targets.Select(target => new TargetPickerItem { Label = target.Name, TargetId = target.Id }));
+
+        _suppressFieldChanges = true;
+        TargetPicker.ItemsSource = items;
+        TargetPicker.SelectedItem = items.FirstOrDefault(item => item.TargetId == _state.SelectedTargetId)
+            ?? items[0];
+        _suppressFieldChanges = false;
+    }
+
+    private void TargetPicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressFieldChanges || TargetPicker.SelectedItem is not TargetPickerItem item) return;
+        if (item.TargetId is null) _state.SelectLocalTarget();
+        else if (_state.Targets.FirstOrDefault(target => target.Id == item.TargetId) is { } target) _state.SelectTarget(target);
+    }
+
+    private void OpenSettings_Click(object sender, RoutedEventArgs e)
+    {
+        var window = new SettingsWindow(_state) { Owner = this };
+        window.ShowDialog();
+        RefreshTargetPicker();
     }
 
     private void AddEndpoint_Click(object sender, RoutedEventArgs e)

@@ -1,0 +1,80 @@
+<Window x:Class="LANWebTerminalManager.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="设置"
+        Width="720"
+        Height="560"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource BgBrush}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1" Padding="18">
+            <Grid>
+                <TextBlock Text="设置" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="保存并关闭" Click="SaveAndClose_Click" Style="{StaticResource PrimaryButton}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="18">
+            <StackPanel>
+                <GroupBox Header="本机作为接收方" Margin="0,0,0,16">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="96"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="文件根目录" VerticalAlignment="Center"/>
+                        <Grid Grid.Row="0" Grid.Column="1" Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="ReceiverRootInput"/>
+                            <Button Grid.Column="1" Content="选择" Margin="8,0,0,0" Click="ChooseReceiverRoot_Click"/>
+                        </Grid>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="接收端口" VerticalAlignment="Center"/>
+                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="ReceiverPortInput" Width="120" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="接收令牌" VerticalAlignment="Center"/>
+                        <Grid Grid.Row="2" Grid.Column="1" Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="ReceiverTokenInput"/>
+                            <Button Grid.Column="1" Content="默认" Margin="8,0,0,0" Click="ResetToken_Click"/>
+                        </Grid>
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="本机地址" VerticalAlignment="Top"/>
+                        <StackPanel Grid.Row="3" Grid.Column="1" x:Name="ReceiverUrlList" Margin="0,0,0,10"/>
+
+                        <Button Grid.Row="4" Grid.Column="1" Content="保存接收方设置" HorizontalAlignment="Left" Click="SaveReceiver_Click"/>
+                    </Grid>
+                </GroupBox>
+
+                <GroupBox Header="管理方目标客户端">
+                    <StackPanel>
+                        <Button Content="添加目标" HorizontalAlignment="Left" Margin="0,0,0,10" Click="AddTarget_Click"/>
+                        <ItemsControl x:Name="TargetsList"/>
+                        <Button Content="保存目标服务器" Margin="0,10,0,0" HorizontalAlignment="Left" Click="SaveTargets_Click"/>
+                    </StackPanel>
+                </GroupBox>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>

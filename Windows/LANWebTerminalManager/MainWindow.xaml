@@ -20,6 +20,7 @@
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
@@ -32,18 +33,24 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <Border Width="28" Height="28" CornerRadius="5" Background="White" BorderBrush="#2E000000" BorderThickness="1">
                             <TextBlock Text="LWM" FontWeight="Black" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <TextBlock Grid.Column="1" Text="网页终端" FontWeight="SemiBold" FontSize="14" VerticalAlignment="Center" Margin="8,0,0,0"/>
-                        <Button Grid.Column="2" Content="+" Width="28" Height="28" Padding="0" Click="AddEndpoint_Click" ToolTip="添加网页终端"/>
-                        <Button Grid.Column="3" Content="×" Width="28" Height="28" Padding="0" Margin="4,0,0,0" Click="RemoveSelected_Click" ToolTip="删除选中的网页终端"/>
+                        <Button Grid.Column="2" Content="设置" Padding="8,4" Margin="0,0,4,0" Click="OpenSettings_Click" ToolTip="接收方与目标服务器设置"/>
+                        <Button Grid.Column="3" Content="+" Width="28" Height="28" Padding="0" Click="AddEndpoint_Click" ToolTip="添加网页终端"/>
+                        <Button Grid.Column="4" Content="×" Width="28" Height="28" Padding="0" Margin="4,0,0,0" Click="RemoveSelected_Click" ToolTip="删除选中的网页终端"/>
                     </Grid>
                 </Border>
 
+                <Border Grid.Row="1" Padding="10,0,10,8">
+                    <ComboBox x:Name="TargetPicker" SelectionChanged="TargetPicker_SelectionChanged"/>
+                </Border>
+
                 <ListBox x:Name="EndpointList"
-                         Grid.Row="1"
+                         Grid.Row="2"
                          BorderThickness="0"
                          Background="Transparent"
                          Padding="8"
@@ -65,7 +72,7 @@
                     </ListBox.ItemTemplate>
                 </ListBox>
 
-                <Border Grid.Row="2" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="10">
+                <Border Grid.Row="3" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="10">
                     <StackPanel>
                         <TextBlock x:Name="UpdateStatusText" Foreground="{StaticResource MutedBrush}" FontSize="12" TextWrapping="Wrap"/>
                         <ProgressBar x:Name="UpdateProgress" Height="6" Margin="0,6,0,0" Visibility="Collapsed"/>
@@ -74,7 +81,7 @@
                     </StackPanel>
                 </Border>
 
-                <Border Grid.Row="3" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="10,8">
+                <Border Grid.Row="4" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="10,8">
                     <Grid>
                         <TextBlock x:Name="ActivityText" Foreground="{StaticResource MutedBrush}" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center"/>
                         <ProgressBar x:Name="BusyIndicator" Width="18" Height="18" HorizontalAlignment="Right" IsIndeterminate="True" Visibility="Collapsed"/>

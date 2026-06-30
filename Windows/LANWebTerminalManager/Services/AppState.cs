@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using System.Windows.Threading;
 using LANWebTerminalManager.Models;
@@ -15,9 +16,17 @@ public sealed class AppState : INotifyPropertyChanged
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    private readonly string _supportDir;
     private readonly string _configPath;
+    private readonly string _targetsPath;
+    private readonly string _receiverSettingsPath;
+    private readonly string _receiverSitesPath;
+    private readonly ReceiverServer _receiverServer;
     private readonly DispatcherTimer _timer;
+
     private Guid? _selection;
+    private Guid? _selectedTargetId;
+    private ReceiverSettings _receiverSettings = ReceiverSettings.CreateDefault();
     private string _activity = "准备就绪";
     private string _command = "";
     private string _terminalOutput = "选择一个网页目录后，可以在这里执行维护命令。";
@@ -25,13 +34,20 @@ public sealed class AppState : INotifyPropertyChanged
 
     public AppState()
     {
-        var support = Path.Combine(
+        _supportDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "LANWebTerminalManager");
-        Directory.CreateDirectory(support);
-        _configPath = Path.Combine(support, "endpoints.json");
+        Directory.CreateDirectory(_supportDir);
+        _configPath = Path.Combine(_supportDir, "endpoints.json");
+        _targetsPath = Path.Combine(_supportDir, "targets.json");
+        _receiverSettingsPath = Path.Combine(_supportDir, "settings.json");
+        _receiverSitesPath = Path.Combine(_supportDir, "receiver-sites.json");
+
+        _receiverServer = new ReceiverServer(HandleReceiverRequest);
 
         Load();
+        LoadTargets();
+        LoadReceiverSettings();
 
         if (Endpoints.Count == 0)
         {
@@ -39,6 +55,7 @@ public sealed class AppState : INotifyPropertyChanged
         }
 
         Selection = Endpoints.FirstOrDefault()?.Id;
+        StartReceiverServer();
         RefreshAll();
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
@@ -47,7 +64,14 @@ public sealed class AppState : INotifyPropertyChanged
     }
 
     public ObservableCollection<WebEndpoint> Endpoints { get; } = new();
+    public ObservableCollection<RemoteTarget> Targets { get; } = new();
     public Dictionary<Guid, EndpointStatus> Statuses { get; } = new();
+
+    public ReceiverSettings ReceiverSettings
+    {
+        get => _receiverSettings;
+        set { _receiverSettings = value; OnPropertyChanged(); OnPropertyChanged(nameof(ReceiverLocalUrl)); OnPropertyChanged(nameof(ReceiverLanUrls)); }
+    }
 
     public Guid? Selection
     {
@@ -62,8 +86,34 @@ public sealed class AppState : INotifyPropertyChanged
         }
     }
 
+    public Guid? SelectedTargetId
+    {
+        get => _selectedTargetId;
+        set
+        {
+            if (_selectedTargetId == value) return;
+            _selectedTargetId = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(SelectedTarget));
+            OnPropertyChanged(nameof(IsLocalTargetSelected));
+            OnPropertyChanged(nameof(SelectedTargetLabel));
+        }
+    }
+
     public WebEndpoint? SelectedEndpoint =>
         Selection is null ? null : Endpoints.FirstOrDefault(item => item.Id == Selection);
+
+    public RemoteTarget? SelectedTarget =>
+        SelectedTargetId is null ? null : Targets.FirstOrDefault(item => item.Id == SelectedTargetId);
+
+    public bool IsLocalTargetSelected => SelectedTargetId is null;
+
+    public string SelectedTargetLabel => SelectedTarget?.Name ?? "local";
+
+    public string ReceiverLocalUrl => $"http://127.0.0.1:{ReceiverSettings.Port}";
+
+    public IEnumerable<string> ReceiverLanUrls =>
+        NetworkHelper.LanIps().Select(ip => $"http://{ip}:{ReceiverSettings.Port}");
 
     public EndpointStatus SelectedStatus =>
         Selection is Guid id && Statuses.TryGetValue(id, out var status) ? status : new EndpointStatus();
@@ -94,6 +144,20 @@ public sealed class AppState : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? StatusesChanged;
+
+    public void SelectLocalTarget()
+    {
+        SelectedTargetId = null;
+        RefreshAll();
+        Activity = "目标已切换：local";
+    }
+
+    public void SelectTarget(RemoteTarget target)
+    {
+        SelectedTargetId = target.Id;
+        RefreshAll();
+        Activity = $"目标已切换：{target.Name}";
+    }
 
     public void AddEndpoint(string rootPath)
     {
@@ -128,8 +192,7 @@ public sealed class AppState : INotifyPropertyChanged
 
     public void RemoveSelected()
     {
-        if (SelectedEndpoint is not { } endpoint) return;
-        Remove(endpoint);
+        if (SelectedEndpoint is { } endpoint) Remove(endpoint);
     }
 
     public void Remove(WebEndpoint endpoint)
@@ -153,9 +216,12 @@ public sealed class AppState : INotifyPropertyChanged
     public void RefreshAll()
     {
         var snapshot = Endpoints.ToList();
+        var target = SelectedTarget;
         Task.Run(() =>
         {
-            var results = snapshot.ToDictionary(item => item.Id, StatusFor);
+            var results = snapshot.ToDictionary(
+                item => item.Id,
+                item => target is null ? StatusFor(item) : RemoteStatusFor(item, target));
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
                 foreach (var endpoint in Endpoints)
@@ -174,9 +240,10 @@ public sealed class AppState : INotifyPropertyChanged
 
     public void Refresh(WebEndpoint endpoint)
     {
+        var target = SelectedTarget;
         Task.Run(() =>
         {
-            var status = StatusFor(endpoint);
+            var status = target is null ? StatusFor(endpoint) : RemoteStatusFor(endpoint, target);
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
                 if (Endpoints.Any(item => item.Id == endpoint.Id))
@@ -212,7 +279,15 @@ public sealed class AppState : INotifyPropertyChanged
         IsBusy = true;
         Task.Run(() =>
         {
-            StopSynchronously(endpoint);
+            if (SelectedTarget is null)
+            {
+                StopSynchronously(endpoint);
+            }
+            else
+            {
+                StopRemoteSync(endpoint, SelectedTarget);
+            }
+
             Thread.Sleep(350);
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
@@ -222,8 +297,14 @@ public sealed class AppState : INotifyPropertyChanged
         });
     }
 
-    public void Start(WebEndpoint endpoint, string reason = "已启动")
+    public void Start(WebEndpoint endpoint, string reason = "已启动", bool forceLocal = false)
     {
+        if (!forceLocal && SelectedTarget is { } target)
+        {
+            StartRemote(endpoint, target);
+            return;
+        }
+
         if (Statuses.TryGetValue(endpoint.Id, out var status) && status.Running)
         {
             Activity = $"{endpoint.Name} 已在运行";
@@ -241,40 +322,13 @@ public sealed class AppState : INotifyPropertyChanged
         {
             try
             {
-                // 启动前先清理同端口的旧进程，避免 Windows 上出现多个 listener 导致 ERR_EMPTY_RESPONSE。
-                StopSynchronously(endpoint);
-                Thread.Sleep(350);
-
-                var pid = PythonHelper.StartServer(endpoint);
-                try
-                {
-                    EndpointPaths.TryWritePid(endpoint, pid);
-                }
-                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
-                {
-                    // PID 文件只是辅助信息，写入失败不应阻断已启动的服务。
-                }
-                Thread.Sleep(450);
-
-                var status = StatusFor(endpoint);
-                if (!status.Running)
-                {
-                    var log = Tail(EndpointPaths.LogFile(endpoint), 30);
-                    throw new InvalidOperationException(
-                        string.IsNullOrWhiteSpace(log) || log == "暂无日志"
-                            ? "Python 服务启动后立即退出，请确认已安装 Python 3。"
-                            : log);
-                }
-
+                var pid = StartLocalSynchronously(endpoint);
                 System.Windows.Application.Current?.Dispatcher.Invoke(() =>
                 {
                     IsBusy = false;
                     Refresh(endpoint);
                     Activity = $"{reason} {endpoint.Name}，PID {pid}";
-                    if (endpoint.AutoOpen)
-                    {
-                        OpenSelectedUrl();
-                    }
+                    if (endpoint.AutoOpen) OpenSelectedUrl();
                 });
             }
             catch (Exception ex)
@@ -289,8 +343,71 @@ public sealed class AppState : INotifyPropertyChanged
         });
     }
 
-    public void Stop(WebEndpoint endpoint)
+    public void StartRemote(WebEndpoint endpoint, RemoteTarget target)
     {
+        if (!Directory.Exists(endpoint.RootPath))
+        {
+            Activity = $"目录不存在：{endpoint.RootPath}";
+            return;
+        }
+
+        IsBusy = true;
+        Task.Run(() =>
+        {
+            try
+            {
+                var payload = new ReceiverSyncPayload
+                {
+                    Token = target.Token,
+                    Endpoint = new ReceiverEndpointPayload
+                    {
+                        Id = endpoint.Id,
+                        Name = endpoint.Name,
+                        Port = endpoint.Port,
+                        Host = endpoint.Host,
+                        UrlPath = endpoint.UrlPath
+                    },
+                    Files = CollectSiteFiles(endpoint.RootPath)
+                };
+                var url = $"{target.ServerURL.TrimmedSlash()}/api/receiver/sites/{endpoint.Id}/sync-start";
+                var data = RemoteApiClient.Request(url, "POST", JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions));
+                var response = JsonSerializer.Deserialize<ReceiverEndpointResponse>(data, JsonOptions)
+                    ?? throw new InvalidOperationException("目标服务器没有返回有效响应");
+                System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    IsBusy = false;
+                    if (response.Status is not null)
+                    {
+                        Statuses[endpoint.Id] = response.Status.ToStatus(response.Status.Urls.FirstOrDefault() ?? "");
+                    }
+
+                    Activity = $"已在 {target.Name} 启动：{endpoint.Name}";
+                    if (endpoint.AutoOpen && response.Status?.Urls.FirstOrDefault() is { } openUrl)
+                    {
+                        OpenUrl(openUrl);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    IsBusy = false;
+                    Activity = $"远端启动失败：{ex.Message}";
+                    Refresh(endpoint);
+                });
+            }
+        });
+    }
+
+    public void Stop(WebEndpoint endpoint, bool forceLocal = false)
+    {
+        if (!forceLocal && SelectedTarget is { } target)
+        {
+            StopRemote(endpoint, target);
+            return;
+        }
+
         IsBusy = true;
         Task.Run(() =>
         {
@@ -298,13 +415,36 @@ public sealed class AppState : INotifyPropertyChanged
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
                 IsBusy = false;
-                if (Endpoints.Any(item => item.Id == endpoint.Id))
-                {
-                    Refresh(endpoint);
-                }
-
+                if (Endpoints.Any(item => item.Id == endpoint.Id)) Refresh(endpoint);
                 Activity = $"{endpoint.Name}：{string.Join("，", messages)}";
             });
+        });
+    }
+
+    public void StopRemote(WebEndpoint endpoint, RemoteTarget target)
+    {
+        IsBusy = true;
+        Task.Run(() =>
+        {
+            try
+            {
+                StopRemoteSync(endpoint, target);
+                System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    IsBusy = false;
+                    Refresh(endpoint);
+                    Activity = $"已停止 {target.Name}：{endpoint.Name}";
+                });
+            }
+            catch (Exception ex)
+            {
+                System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    IsBusy = false;
+                    Activity = $"远端停止失败：{ex.Message}";
+                    Refresh(endpoint);
+                });
+            }
         });
     }
 
@@ -402,6 +542,39 @@ public sealed class AppState : INotifyPropertyChanged
         Command = "";
         IsBusy = true;
 
+        if (SelectedTarget is { } target)
+        {
+            Task.Run(() =>
+            {
+                try
+                {
+                    var payload = new ReceiverCommandPayload { Token = target.Token, Command = trimmed };
+                    var url = $"{target.ServerURL.TrimmedSlash()}/api/receiver/sites/{endpoint.Id}/command";
+                    var data = RemoteApiClient.Request(url, "POST", JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions));
+                    var result = JsonSerializer.Deserialize<RemoteCommandResult>(data, JsonOptions)
+                        ?? throw new InvalidOperationException("远端命令没有返回有效结果");
+                    System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                    {
+                        IsBusy = false;
+                        TerminalOutput += $"\n{(string.IsNullOrWhiteSpace(result.Output) ? "(无输出)" : result.Output)}";
+                        Activity = result.Ok ? "命令完成" : $"命令失败，退出码 {result.Status}";
+                        Refresh(endpoint);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                    {
+                        IsBusy = false;
+                        TerminalOutput += $"\n{ex.Message}";
+                        Activity = "远端命令失败";
+                        Refresh(endpoint);
+                    });
+                }
+            });
+            return;
+        }
+
         Task.Run(() =>
         {
             var result = ShellHelper.RunCommand(trimmed, endpoint.RootPath);
@@ -416,29 +589,153 @@ public sealed class AppState : INotifyPropertyChanged
         });
     }
 
+    public void SaveTargets()
+    {
+        try
+        {
+            File.WriteAllText(_targetsPath, JsonSerializer.Serialize(Targets.ToList(), JsonOptions));
+        }
+        catch (Exception ex)
+        {
+            Activity = $"保存目标服务器失败：{ex.Message}";
+        }
+    }
+
+    public void SaveReceiverSettings()
+    {
+        try
+        {
+            var token = ReceiverSettings.Token.Trim();
+            if (string.IsNullOrEmpty(token))
+            {
+                Activity = "接收令牌不能为空";
+                return;
+            }
+
+            ReceiverSettings.Token = token;
+            Directory.CreateDirectory(ReceiverSettings.RootPath);
+            File.WriteAllText(_receiverSettingsPath, JsonSerializer.Serialize(ReceiverSettings, JsonOptions));
+            StartReceiverServer();
+            OnPropertyChanged(nameof(ReceiverLocalUrl));
+            OnPropertyChanged(nameof(ReceiverLanUrls));
+            Activity = "已保存接收方设置";
+        }
+        catch (Exception ex)
+        {
+            Activity = $"保存接收方设置失败：{ex.Message}";
+        }
+    }
+
+    public void AddTarget()
+    {
+        var target = new RemoteTarget
+        {
+            Name = "新服务器",
+            ServerURL = "http://192.168.1.20:4177",
+            Token = ""
+        };
+        Targets.Add(target);
+        SelectedTargetId = target.Id;
+        SaveTargets();
+        OnPropertyChanged(nameof(SelectedTargetLabel));
+    }
+
+    public void RemoveTarget(RemoteTarget target)
+    {
+        Targets.Remove(target);
+        if (SelectedTargetId == target.Id) SelectedTargetId = null;
+        SaveTargets();
+        RefreshAll();
+    }
+
+    public void ProbeTarget(RemoteTarget target)
+    {
+        var index = Targets.IndexOf(target);
+        if (index < 0) return;
+
+        IsBusy = true;
+        Task.Run(() =>
+        {
+            try
+            {
+                var url = $"{target.ServerURL.TrimmedSlash()}/api/settings";
+                var data = RemoteApiClient.Request(url, "GET");
+                var payload = JsonSerializer.Deserialize<ReceiverSettingsPayload>(data, JsonOptions)
+                    ?? throw new InvalidOperationException("无效响应");
+                System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    IsBusy = false;
+                    Targets[index].Platform = payload.Platform;
+                    SaveTargets();
+                    Activity = $"已连接：{Targets[index].Name}（{payload.Platform}）";
+                });
+            }
+            catch (Exception ex)
+            {
+                System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    IsBusy = false;
+                    Activity = $"连接目标失败：{ex.Message}";
+                });
+            }
+        });
+    }
+
+    private int StartLocalSynchronously(WebEndpoint endpoint)
+    {
+        StopSynchronously(endpoint);
+        Thread.Sleep(350);
+
+        var pid = PythonHelper.StartServer(endpoint);
+        try { EndpointPaths.TryWritePid(endpoint, pid); } catch (UnauthorizedAccessException) { } catch (IOException) { }
+
+        Thread.Sleep(450);
+        var status = StatusFor(endpoint);
+        if (!status.Running)
+        {
+            var log = Tail(EndpointPaths.LogFile(endpoint), 30);
+            throw new InvalidOperationException(
+                string.IsNullOrWhiteSpace(log) || log == "暂无日志"
+                    ? "Python 服务启动后立即退出，请确认已安装 Python 3。"
+                    : log);
+        }
+
+        return pid;
+    }
+
+    private void StopRemoteSync(WebEndpoint endpoint, RemoteTarget target)
+    {
+        var payload = new ReceiverCommandPayload { Token = target.Token };
+        var url = $"{target.ServerURL.TrimmedSlash()}/api/receiver/sites/{endpoint.Id}/stop";
+        var data = RemoteApiClient.Request(url, "POST", JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions));
+        var response = JsonSerializer.Deserialize<ReceiverEndpointResponse>(data, JsonOptions);
+        if (response?.Status is not null)
+        {
+            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+            {
+                Statuses[endpoint.Id] = response.Status.ToStatus(response.Status.Urls.FirstOrDefault() ?? "");
+            });
+        }
+    }
+
     private List<string> StopSynchronously(WebEndpoint endpoint)
     {
-        var filePid = PidFromFile(EndpointPaths.PidFile(endpoint));
-        if (filePid is null)
-        {
-            filePid = PidFromFile(EndpointPaths.LegacyPidFile(endpoint));
-        }
-        var targets = NetworkHelper.ListenerPids(endpoint.Port).ToHashSet();
-        if (filePid is int pid) targets.Add(pid);
+        var filePid = PidFromFile(EndpointPaths.PidFile(endpoint)) ?? PidFromFile(EndpointPaths.LegacyPidFile(endpoint));
+        var pids = NetworkHelper.ListenerPids(endpoint.Port).ToHashSet();
+        if (filePid is int pid) pids.Add(pid);
 
         var messages = new List<string>();
-        if (targets.Count == 0)
+        if (pids.Count == 0)
         {
             messages.Add("服务未运行");
         }
         else
         {
-            foreach (var target in targets.OrderBy(item => item))
+            foreach (var target in pids.OrderBy(item => item))
             {
                 try
                 {
-                    var process = System.Diagnostics.Process.GetProcessById(target);
-                    process.Kill(true);
+                    System.Diagnostics.Process.GetProcessById(target).Kill(true);
                     messages.Add($"已发送关闭信号：{target}");
                 }
                 catch (Exception ex)
@@ -453,7 +750,231 @@ public sealed class AppState : INotifyPropertyChanged
         return messages;
     }
 
-    private static EndpointStatus StatusFor(WebEndpoint endpoint)
+    private EndpointStatus RemoteStatusFor(WebEndpoint endpoint, RemoteTarget target)
+    {
+        try
+        {
+            var url = $"{target.ServerURL.TrimmedSlash()}/api/receiver/sites/{endpoint.Id}/status?token={target.Token.UrlQueryEscaped()}";
+            var data = RemoteApiClient.Request(url, "GET");
+            var response = JsonSerializer.Deserialize<ReceiverEndpointResponse>(data, JsonOptions);
+            return response?.Status?.ToStatus(response.Status.Urls.FirstOrDefault() ?? "")
+                ?? new EndpointStatus { LogTail = "目标服务器没有返回状态" };
+        }
+        catch (Exception ex)
+        {
+            return new EndpointStatus { LogTail = $"无法连接目标服务器：{ex.Message}" };
+        }
+    }
+
+    private (int Status, byte[] Body) HandleReceiverRequest(string method, string path, byte[] body)
+    {
+        if (method == "GET" && path == "/api/settings")
+        {
+            return JsonResponse(200, new ReceiverSettingsPayload
+            {
+                Platform = "win32",
+                ProtocolVersion = 1
+            });
+        }
+
+        var pathOnly = path.Split('?')[0];
+        var parts = pathOnly.Trim('/').Split('/');
+        if (parts.Length < 5 || parts[0] != "api" || parts[1] != "receiver" || parts[2] != "sites")
+        {
+            return JsonResponse(404, new Dictionary<string, string> { ["error"] = "未知 API" });
+        }
+
+        var siteId = parts[3];
+        var action = parts[4];
+
+        try
+        {
+            if (method == "POST" && action == "sync-start")
+            {
+                var payload = JsonSerializer.Deserialize<ReceiverSyncPayload>(body, JsonOptions)
+                    ?? throw new InvalidOperationException("无效请求体");
+                if (payload.Token != ReceiverSettings.Token)
+                {
+                    return JsonResponse(403, new Dictionary<string, string> { ["error"] = "接收令牌无效" });
+                }
+
+                var endpoint = ReceiveSite(payload);
+                StartLocalSynchronously(endpoint);
+                Thread.Sleep(500);
+                return EndpointResponse(endpoint);
+            }
+
+            var commandPayload = body.Length > 0
+                ? JsonSerializer.Deserialize<ReceiverCommandPayload>(body, JsonOptions)
+                : null;
+            var token = commandPayload?.Token;
+            if (string.IsNullOrEmpty(token))
+            {
+                token = ParseQueryToken(path);
+            }
+
+            if (token != ReceiverSettings.Token)
+            {
+                return JsonResponse(403, new Dictionary<string, string> { ["error"] = "接收令牌无效" });
+            }
+
+            if (!Guid.TryParse(siteId, out var id))
+            {
+                return JsonResponse(404, new Dictionary<string, string> { ["error"] = "接收方未找到该站点" });
+            }
+
+            var endpointFromSite = LoadReceiverSites().FirstOrDefault(item => item.Id == id);
+            if (endpointFromSite is null)
+            {
+                return JsonResponse(404, new Dictionary<string, string> { ["error"] = "接收方未找到该站点" });
+            }
+
+            if (method == "GET" && action == "status")
+            {
+                return EndpointResponse(endpointFromSite);
+            }
+
+            if (method == "POST" && action == "stop")
+            {
+                StopSynchronously(endpointFromSite);
+                Thread.Sleep(500);
+                return EndpointResponse(endpointFromSite);
+            }
+
+            if (method == "POST" && action == "command")
+            {
+                var command = commandPayload?.Command?.Trim();
+                if (string.IsNullOrEmpty(command))
+                {
+                    return JsonResponse(400, new Dictionary<string, string> { ["error"] = "请输入命令" });
+                }
+
+                var result = ShellHelper.RunCommand(command, endpointFromSite.RootPath);
+                var output = string.Join("\n", new[] { result.Stdout, result.Stderr }.Where(item => !string.IsNullOrWhiteSpace(item)));
+                return JsonResponse(200, new RemoteCommandResult
+                {
+                    Ok = result.Ok,
+                    Status = result.ExitCode,
+                    Stdout = result.Stdout,
+                    Stderr = result.Stderr,
+                    Output = string.IsNullOrWhiteSpace(output) ? "(无输出)" : output
+                });
+            }
+
+            return JsonResponse(404, new Dictionary<string, string> { ["error"] = "未知 API" });
+        }
+        catch (Exception ex)
+        {
+            return JsonResponse(500, new Dictionary<string, string> { ["error"] = ex.Message });
+        }
+    }
+
+    private WebEndpoint ReceiveSite(ReceiverSyncPayload payload)
+    {
+        var siteName = SanitizeSiteName(payload.Endpoint.Name);
+        var root = Path.Combine(ReceiverSettings.RootPath, siteName);
+        if (Directory.Exists(root)) Directory.Delete(root, true);
+        Directory.CreateDirectory(root);
+
+        foreach (var file in payload.Files)
+        {
+            var target = SafeReceiverFile(root, file.Path);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            var bytes = Convert.FromBase64String(file.Content);
+            File.WriteAllBytes(target, bytes);
+        }
+
+        var endpoint = new WebEndpoint
+        {
+            Id = payload.Endpoint.Id,
+            Name = payload.Endpoint.Name,
+            RootPath = root,
+            Port = payload.Endpoint.Port,
+            Host = payload.Endpoint.Host,
+            UrlPath = payload.Endpoint.UrlPath,
+            AutoOpen = false
+        };
+
+        var sites = LoadReceiverSites();
+        sites.RemoveAll(item => item.Id == endpoint.Id);
+        sites.Add(endpoint);
+        SaveReceiverSites(sites);
+        return endpoint;
+    }
+
+    private List<WebEndpoint> LoadReceiverSites()
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<List<WebEndpoint>>(File.ReadAllText(_receiverSitesPath), JsonOptions) ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private void SaveReceiverSites(List<WebEndpoint> sites)
+    {
+        File.WriteAllText(_receiverSitesPath, JsonSerializer.Serialize(sites, JsonOptions));
+    }
+
+    private static string SafeReceiverFile(string root, string relativePath)
+    {
+        var normalized = relativePath.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (normalized.Length == 0 || normalized.Any(part => part == "..") || relativePath.Contains(':') || relativePath.StartsWith('/'))
+        {
+            throw new InvalidOperationException($"非法文件路径：{relativePath}");
+        }
+
+        return normalized.Aggregate(root, Path.Combine);
+    }
+
+    private static string SanitizeSiteName(string value)
+    {
+        var chars = value.Select(ch => char.IsLetterOrDigit(ch) || ch is '.' or '_' or '-' ? ch : '_').ToArray();
+        var name = new string(chars).Trim('_');
+        return string.IsNullOrEmpty(name) ? "site" : name;
+    }
+
+    private (int Status, byte[] Body) EndpointResponse(WebEndpoint endpoint)
+    {
+        var status = StatusFor(endpoint);
+        var response = new ReceiverEndpointResponse
+        {
+            Endpoint = endpoint,
+            Status = EndpointStatusDto.FromStatus(status)
+        };
+        return JsonResponse(200, response);
+    }
+
+    private static (int Status, byte[] Body) JsonResponse<T>(int status, T body) =>
+        (status, JsonSerializer.SerializeToUtf8Bytes(body, JsonOptions));
+
+    private static List<SiteFilePayload> CollectSiteFiles(string rootPath)
+    {
+        var files = new List<SiteFilePayload>();
+        foreach (var fullPath in Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(rootPath, fullPath).Replace('\\', '/');
+            var lower = rel.ToLowerInvariant();
+            if (lower.StartsWith(".git/") || lower.StartsWith("node_modules/") || lower.StartsWith("build/") || lower.StartsWith(".build/"))
+            {
+                continue;
+            }
+
+            var bytes = File.ReadAllBytes(fullPath);
+            files.Add(new SiteFilePayload
+            {
+                Path = rel,
+                Content = Convert.ToBase64String(bytes)
+            });
+        }
+
+        return files;
+    }
+
+    private EndpointStatus StatusFor(WebEndpoint endpoint)
     {
         var pids = NetworkHelper.ListenerPids(endpoint.Port);
         var urlPath = NormalizeUrlPath(endpoint.UrlPath);
@@ -475,16 +996,48 @@ public sealed class AppState : INotifyPropertyChanged
         Endpoints.Clear();
         try
         {
-            var data = File.ReadAllText(_configPath);
-            var items = JsonSerializer.Deserialize<List<WebEndpoint>>(data, JsonOptions) ?? [];
-            foreach (var item in items)
-            {
-                Endpoints.Add(item);
-            }
+            var items = JsonSerializer.Deserialize<List<WebEndpoint>>(File.ReadAllText(_configPath), JsonOptions) ?? [];
+            foreach (var item in items) Endpoints.Add(item);
+        }
+        catch { }
+    }
+
+    private void LoadTargets()
+    {
+        Targets.Clear();
+        try
+        {
+            var items = JsonSerializer.Deserialize<List<RemoteTarget>>(File.ReadAllText(_targetsPath), JsonOptions) ?? [];
+            foreach (var item in items) Targets.Add(item);
+        }
+        catch { }
+    }
+
+    private void LoadReceiverSettings()
+    {
+        try
+        {
+            ReceiverSettings = JsonSerializer.Deserialize<ReceiverSettings>(File.ReadAllText(_receiverSettingsPath), JsonOptions)
+                ?? ReceiverSettings.CreateDefault();
         }
         catch
         {
-            // use empty list
+            ReceiverSettings = ReceiverSettings.CreateDefault();
+            SaveReceiverSettings();
+        }
+
+        Directory.CreateDirectory(ReceiverSettings.RootPath);
+    }
+
+    private void StartReceiverServer()
+    {
+        try
+        {
+            _receiverServer.Start(ReceiverSettings.Port);
+        }
+        catch (Exception ex)
+        {
+            Activity = $"接收方服务启动失败：{ex.Message}";
         }
     }
 
@@ -492,8 +1045,7 @@ public sealed class AppState : INotifyPropertyChanged
     {
         try
         {
-            var json = JsonSerializer.Serialize(Endpoints.ToList(), JsonOptions);
-            File.WriteAllText(_configPath, json);
+            File.WriteAllText(_configPath, JsonSerializer.Serialize(Endpoints.ToList(), JsonOptions));
         }
         catch (Exception ex)
         {
@@ -501,10 +1053,7 @@ public sealed class AppState : INotifyPropertyChanged
         }
     }
 
-    private void SeedDefaultEndpoints()
-    {
-        // Windows 版不预置 macOS 专用路径
-    }
+    private static void SeedDefaultEndpoints() { }
 
     private static int? PidFromFile(string path)
     {
@@ -521,8 +1070,7 @@ public sealed class AppState : INotifyPropertyChanged
 
     private static string BuildServiceUrl(string host, int port, string urlPath)
     {
-        var path = NormalizeUrlPath(urlPath);
-        return new UriBuilder("http", host, port, path).Uri.AbsoluteUri;
+        return new UriBuilder("http", host, port, NormalizeUrlPath(urlPath)).Uri.AbsoluteUri;
     }
 
     private static string NormalizeUrlPath(string path)
@@ -551,27 +1099,14 @@ public sealed class AppState : INotifyPropertyChanged
 
     private static string Mtime(string path)
     {
-        try
-        {
-            return File.GetLastWriteTime(path).ToString("yyyy-MM-dd HH:mm:ss");
-        }
-        catch
-        {
-            return "--";
-        }
+        try { return File.GetLastWriteTime(path).ToString("yyyy-MM-dd HH:mm:ss"); }
+        catch { return "--"; }
     }
 
     private static string Tail(string path, int lines)
     {
-        try
-        {
-            var text = File.ReadAllLines(path);
-            return string.Join(Environment.NewLine, text.TakeLast(lines));
-        }
-        catch
-        {
-            return "暂无日志";
-        }
+        try { return string.Join(Environment.NewLine, File.ReadAllLines(path).TakeLast(lines)); }
+        catch { return "暂无日志"; }
     }
 
     private static void OpenUrl(string url)
@@ -581,6 +1116,19 @@ public sealed class AppState : INotifyPropertyChanged
             FileName = url,
             UseShellExecute = true
         });
+    }
+
+    private static string? ParseQueryToken(string path)
+    {
+        var queryIndex = path.IndexOf('?', StringComparison.Ordinal);
+        if (queryIndex < 0) return null;
+        foreach (var part in path[(queryIndex + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var kv = part.Split('=', 2);
+            if (kv.Length == 2 && kv[0] == "token") return Uri.UnescapeDataString(kv[1]);
+        }
+
+        return null;
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>
