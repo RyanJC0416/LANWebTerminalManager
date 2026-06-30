@@ -106,7 +106,7 @@ struct ReceiverSettings: Codable, Equatable {
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents", isDirectory: true)
         return ReceiverSettings(
             rootPath: documents.appendingPathComponent("LWM Server", isDirectory: true).path,
-            token: UUID().uuidString
+            token: "lwm-server"
         )
     }
 }
@@ -801,6 +801,12 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     func saveReceiverSettings() {
         do {
+            let token = receiverSettings.token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !token.isEmpty else {
+                activity = "接收令牌不能为空"
+                return
+            }
+            receiverSettings.token = token
             try FileManager.default.createDirectory(atPath: receiverSettings.rootPath, withIntermediateDirectories: true)
             let data = try JSONEncoder.pretty.encode(receiverSettings)
             try data.write(to: receiverSettingsURL, options: .atomic)
@@ -1715,12 +1721,12 @@ struct SettingsView: View {
                 GridRow {
                     Text("接收令牌")
                     HStack {
-                        SecureField("接收令牌", text: $state.receiverSettings.token)
+                        TextField("例如：office-server", text: $state.receiverSettings.token)
                             .textFieldStyle(.roundedBorder)
                         Button {
-                            state.receiverSettings.token = UUID().uuidString
+                            state.receiverSettings.token = "lwm-server"
                         } label: {
-                            Label("重置", systemImage: "arrow.clockwise")
+                            Label("默认", systemImage: "arrow.clockwise")
                         }
                     }
                 }
@@ -1780,7 +1786,7 @@ struct SettingsView: View {
                         }
                         TextField("LWM 客户端地址，例如 http://192.168.1.20:4177", text: $target.serverURL)
                             .textFieldStyle(.roundedBorder)
-                        SecureField("接收令牌", text: $target.token)
+                        TextField("接收方设置中的字符串，例如 office-server", text: $target.token)
                             .textFieldStyle(.roundedBorder)
                         if !target.platform.isEmpty {
                             Text("平台：\(target.platform)")

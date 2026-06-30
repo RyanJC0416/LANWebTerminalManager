@@ -10,7 +10,7 @@ namespace LANWebTerminalManager.Services;
 
 public sealed class UpdateManager : INotifyPropertyChanged
 {
-    public const string CurrentVersion = "2.0.0";
+    public const string CurrentVersion = "2.0.1";
 
     private readonly HttpClient _http = new()
     {
