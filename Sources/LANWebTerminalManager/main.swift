@@ -69,6 +69,8 @@ struct WebEndpoint: Identifiable, Codable, Equatable {
     var host: String = "0.0.0.0"
     var urlPath: String = "/"
     var autoOpen = false
+    /// nil 表示 local 分类；非 nil 表示对应远程目标分类
+    var targetID: UUID?
 
     var pidFile: String { "\(rootPath)/.lan-web-terminal-\(port).pid" }
     var logFile: String { "\(rootPath)/.lan-web-terminal-\(port).log" }
@@ -337,7 +339,7 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         if endpoints.isEmpty {
             seedDefaultEndpoints()
         }
-        selection = endpoints.first?.id
+        syncSelectionToVisibleCategory()
         startReceiverServer()
         refreshAll()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -357,6 +359,15 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     var isLocalTargetSelected: Bool {
         selectedTargetID == nil
+    }
+
+    var visibleEndpoints: [WebEndpoint] {
+        endpoints.filter { $0.targetID == selectedTargetID }
+    }
+
+    func targetName(for targetID: UUID?) -> String {
+        guard let targetID else { return "local" }
+        return targets.first { $0.id == targetID }?.name ?? "未知分类"
     }
 
     var receiverLocalURL: String {
@@ -381,14 +392,61 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     func selectLocalTarget() {
         selectedTargetID = nil
+        syncSelectionToVisibleCategory()
         refreshAll()
         activity = "目标已切换：local"
     }
 
     func selectTarget(_ target: RemoteTarget) {
         selectedTargetID = target.id
+        syncSelectionToVisibleCategory()
         refreshAll()
         activity = "目标已切换：\(target.name)"
+    }
+
+    func syncSelectionToVisibleCategory() {
+        let visible = visibleEndpoints
+        if let selection, visible.contains(where: { $0.id == selection }) {
+            return
+        }
+        selection = visible.first?.id
+    }
+
+    func transferEndpoint(_ endpoint: WebEndpoint, toTargetID: UUID?) {
+        guard let index = endpoints.firstIndex(where: { $0.id == endpoint.id }) else { return }
+        guard endpoints[index].targetID != toTargetID else { return }
+        endpoints[index].targetID = toTargetID
+        save()
+        syncSelectionToVisibleCategory()
+        activity = "已转移至 \(targetName(for: toTargetID))：\(endpoint.name)"
+    }
+
+    func copyEndpoint(_ endpoint: WebEndpoint, toTargetID: UUID?) {
+        guard let source = endpoints.first(where: { $0.id == endpoint.id }) else { return }
+        var copy = source
+        copy.id = UUID()
+        copy.port = nextAvailablePort()
+        copy.targetID = toTargetID
+        endpoints.append(copy)
+        save()
+        activity = "已复制至 \(targetName(for: toTargetID))：\(copy.name)"
+    }
+
+    func removeVisibleEndpoints(at offsets: IndexSet) {
+        let visible = visibleEndpoints
+        for index in offsets.sorted(by: >) {
+            guard visible.indices.contains(index) else { continue }
+            remove(visible[index])
+        }
+    }
+
+    private func nextAvailablePort() -> Int {
+        let usedPorts = Set(endpoints.map(\.port))
+        var port = 8088
+        while usedPorts.contains(port) {
+            port += 1
+        }
+        return port
     }
 
     func addEndpoint() {
@@ -399,15 +457,11 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        let usedPorts = Set(endpoints.map(\.port))
-        var port = 8088
-        while usedPorts.contains(port) {
-            port += 1
-        }
-        var endpoint = WebEndpoint(name: url.lastPathComponent, rootPath: url.path, port: port)
+        var endpoint = WebEndpoint(name: url.lastPathComponent, rootPath: url.path, port: nextAvailablePort())
         if FileManager.default.fileExists(atPath: url.appendingPathComponent("web").path) {
             endpoint.urlPath = "/web/"
         }
+        endpoint.targetID = selectedTargetID
         endpoints.append(endpoint)
         selection = endpoint.id
         save()
@@ -424,20 +478,13 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         stop(endpoint)
         endpoints.removeAll { $0.id == endpoint.id }
         statuses.removeValue(forKey: endpoint.id)
-        selection = endpoints.first?.id
+        syncSelectionToVisibleCategory()
         save()
         activity = "已移除：\(endpoint.name)"
     }
 
-    func removeEndpoints(at offsets: IndexSet) {
-        for index in offsets.sorted(by: >) {
-            guard endpoints.indices.contains(index) else { continue }
-            remove(endpoints[index])
-        }
-    }
-
     func refreshAll() {
-        let snapshot = endpoints
+        let snapshot = visibleEndpoints
         let target = selectedTarget
         DispatchQueue.global(qos: .utility).async {
             let results = snapshot.map { endpoint in
@@ -848,11 +895,16 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
     }
 
     func removeTarget(_ target: RemoteTarget) {
+        for index in endpoints.indices where endpoints[index].targetID == target.id {
+            endpoints[index].targetID = nil
+        }
         targets.removeAll { $0.id == target.id }
         if selectedTargetID == target.id {
             selectedTargetID = nil
         }
+        save()
         saveTargets()
+        syncSelectionToVisibleCategory()
         refreshAll()
     }
 
@@ -1343,10 +1395,41 @@ struct ContentView: View {
                 .padding(.horizontal, 10)
                 .padding(.bottom, 8)
             List(selection: $state.selection) {
-                ForEach(state.endpoints) { endpoint in
+                ForEach(state.visibleEndpoints) { endpoint in
                     SidebarRow(endpoint: endpoint, status: state.statuses[endpoint.id])
                         .tag(endpoint.id)
                         .contextMenu {
+                            Menu("转移至分类") {
+                                Button {
+                                    state.transferEndpoint(endpoint, toTargetID: nil)
+                                } label: {
+                                    Label("local", systemImage: "desktopcomputer")
+                                }
+                                .disabled(endpoint.targetID == nil)
+                                ForEach(state.targets) { target in
+                                    Button {
+                                        state.transferEndpoint(endpoint, toTargetID: target.id)
+                                    } label: {
+                                        Label(target.name, systemImage: "server.rack")
+                                    }
+                                    .disabled(endpoint.targetID == target.id)
+                                }
+                            }
+                            Menu("复制至分类") {
+                                Button {
+                                    state.copyEndpoint(endpoint, toTargetID: nil)
+                                } label: {
+                                    Label("local", systemImage: "desktopcomputer")
+                                }
+                                ForEach(state.targets) { target in
+                                    Button {
+                                        state.copyEndpoint(endpoint, toTargetID: target.id)
+                                    } label: {
+                                        Label(target.name, systemImage: "server.rack")
+                                    }
+                                }
+                            }
+                            Divider()
                             Button(role: .destructive) {
                                 state.remove(endpoint)
                             } label: {
@@ -1354,7 +1437,7 @@ struct ContentView: View {
                             }
                         }
                 }
-                .onDelete(perform: state.removeEndpoints)
+                .onDelete(perform: state.removeVisibleEndpoints)
             }
             Divider()
             VStack(alignment: .leading, spacing: 8) {
