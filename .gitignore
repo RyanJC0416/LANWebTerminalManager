@@ -6,3 +6,5 @@ DerivedData/
 *.xcuserdata/
 *.pid
 *.log
+Windows/**/bin/
+Windows/**/obj/

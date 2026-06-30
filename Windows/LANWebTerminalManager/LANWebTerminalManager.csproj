@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>LANWebTerminalManager</AssemblyName>
+    <RootNamespace>LANWebTerminalManager</RootNamespace>
+    <Version>1.2.2</Version>
+    <AssemblyTitle>局域网网页终端管理器</AssemblyTitle>
+    <Product>LANWebTerminalManager</Product>
+    <Company>Ryan</Company>
+    <Description>管理局域网网页目录与 Python 静态服务</Description>
+  </PropertyGroup>
+
+</Project>

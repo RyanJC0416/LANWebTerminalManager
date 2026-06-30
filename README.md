@@ -1,18 +1,21 @@
 # 局域网网页终端管理器
 
-原生 SwiftUI macOS app，用来管理本机目录中的网页项目，并把它们快速发布到局域网内访问。
+原生 app，用来管理本机目录中的网页项目，并把它们快速发布到局域网内访问。
+
+- macOS：SwiftUI 原生版
+- Windows：WPF 原生版
+- 全平台：本地 Web 版
 
 ## 功能
 
 - 管理多个网页根目录
-- 启动和停止 `python3 -m http.server`
+- 启动和停止 Python 静态 HTTP 服务（无缓存响应头）
 - 自动展示本机地址与局域网 IP 地址
 - 配置端口、监听范围、入口路径和启动后自动打开
 - 打开网页、打开目录、复制访问地址
 - 在选中目录中执行维护命令
 - 查看每个服务的日志尾部
-- 首次启动会自动识别 `DestinyApp` 和旧的“战斗设计”目录
-- 提供 macOS 原生版和本地 Web 版
+- 检查应用更新
 
 ## macOS 版
 
@@ -32,7 +35,32 @@ Release 下载：
 open "build/局域网网页终端管理器.app"
 ```
 
-## 安装提示
+## Windows 版
+
+依赖：
+
+- [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)
+- Python 3（`py`、`python` 或 `python3` 任一可用即可）
+
+Release 下载：
+
+- `LANWebTerminalManager-v版本号-Windows.zip`：Windows 原生版
+
+构建：
+
+```powershell
+.\Windows\build_windows.ps1
+```
+
+开发运行：
+
+```powershell
+dotnet run --project Windows\LANWebTerminalManager
+```
+
+构建产物位于 `Windows\LANWebTerminalManager\bin\Release\net8.0-windows\`，可直接运行 `LANWebTerminalManager.exe`。
+
+## 安装提示（macOS）
 
 Release 包是本地 ad-hoc 签名，未做 Apple notarization。如果 Safari 下载后 macOS 提示应用“已损坏”或无法验证，先解压并放到 `/Applications`，然后执行：
 
