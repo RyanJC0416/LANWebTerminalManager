@@ -588,6 +588,7 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     func refreshSelectedAssets() {
         guard let endpoint = selectedEndpoint else { return }
+        let target = selectedTarget
         guard statuses[endpoint.id]?.running == true else {
             refresh(endpoint)
             activity = "已刷新资产状态：\(endpoint.name)"
@@ -596,7 +597,25 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
         isBusy = true
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = self.stopSynchronously(endpoint)
+            if let target {
+                do {
+                    let status = try self.stopRemoteSynchronously(endpoint, target: target)
+                    DispatchQueue.main.async {
+                        if self.endpoints.contains(where: { $0.id == endpoint.id }) {
+                            self.statuses[endpoint.id] = status
+                        }
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.isBusy = false
+                        self.activity = "远端停止失败：\(error.localizedDescription)"
+                        self.refresh(endpoint)
+                    }
+                    return
+                }
+            } else {
+                _ = self.stopSynchronously(endpoint)
+            }
             Thread.sleep(forTimeInterval: 0.35)
             DispatchQueue.main.async {
                 self.isBusy = false
@@ -705,13 +724,10 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         isBusy = true
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let body = try JSONEncoder().encode(ReceiverCommandPayload(token: target.token, command: nil))
-                let url = URL(string: "\(target.serverURL.trimmedSlash)/api/receiver/sites/\(endpoint.id.uuidString)/stop")!
-                let data = try Self.request(url: url, method: "POST", body: body)
-                let response = try JSONDecoder().decode(ReceiverEndpointResponse.self, from: data)
+                let status = try self.stopRemoteSynchronously(endpoint, target: target)
                 DispatchQueue.main.async {
                     self.isBusy = false
-                    self.statuses[endpoint.id] = response.status?.status
+                    self.statuses[endpoint.id] = status
                     self.activity = "已停止 \(target.name)：\(endpoint.name)"
                 }
             } catch {
@@ -722,6 +738,14 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
                 }
             }
         }
+    }
+
+    nonisolated private func stopRemoteSynchronously(_ endpoint: WebEndpoint, target: RemoteTarget) throws -> EndpointStatus {
+        let body = try JSONEncoder().encode(ReceiverCommandPayload(token: target.token, command: nil))
+        let url = URL(string: "\(target.serverURL.trimmedSlash)/api/receiver/sites/\(endpoint.id.uuidString)/stop")!
+        let data = try Self.request(url: url, method: "POST", body: body)
+        let response = try JSONDecoder().decode(ReceiverEndpointResponse.self, from: data)
+        return response.status?.status ?? EndpointStatus(logTail: "目标服务器没有返回状态")
     }
 
     nonisolated private func stopSynchronously(_ endpoint: WebEndpoint) -> [String] {
