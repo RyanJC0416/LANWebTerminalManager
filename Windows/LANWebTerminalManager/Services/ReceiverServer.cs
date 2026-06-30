@@ -6,6 +6,8 @@ namespace LANWebTerminalManager.Services;
 
 public sealed class ReceiverServer : IDisposable
 {
+    private const int MaxRequestBytes = 128 * 1024 * 1024;
+
     private readonly Func<string, string, byte[], (int Status, byte[] Body)> _handler;
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
@@ -62,26 +64,74 @@ public sealed class ReceiverServer : IDisposable
         {
             try
             {
-                var buffer = new byte[1_048_576];
-                var total = 0;
-                while (total < buffer.Length)
+                var request = ReadHttpRequest(stream);
+                if (request is null)
                 {
-                    var read = stream.Read(buffer, total, buffer.Length - total);
-                    if (read <= 0) break;
-                    total += read;
-                    if (TryParseRequest(buffer.AsSpan(0, total), out var method, out var path, out var body))
-                    {
-                        var (status, responseBody) = _handler(method, path, body);
-                        WriteResponse(stream, status, responseBody);
-                        return;
-                    }
+                    WriteResponse(stream, 400, Encoding.UTF8.GetBytes("{\"error\":\"invalid request\"}"));
+                    return;
                 }
+
+                if (!TryParseRequest(request, out var method, out var path, out var body))
+                {
+                    WriteResponse(stream, 400, Encoding.UTF8.GetBytes("{\"error\":\"bad request\"}"));
+                    return;
+                }
+
+                var (status, responseBody) = _handler(method, path, body);
+                WriteResponse(stream, status, responseBody);
             }
             catch
             {
                 // ignore client errors
             }
         }
+    }
+
+    private static byte[]? ReadHttpRequest(NetworkStream stream)
+    {
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        var marker = Encoding.ASCII.GetBytes("\r\n\r\n");
+
+        while (buffer.Length < MaxRequestBytes)
+        {
+            var read = stream.Read(chunk, 0, chunk.Length);
+            if (read <= 0) break;
+            buffer.Write(chunk, 0, read);
+
+            var data = buffer.GetBuffer().AsSpan(0, (int)buffer.Length);
+            var headerEnd = IndexOf(data, marker);
+            if (headerEnd < 0) continue;
+
+            var headerText = Encoding.UTF8.GetString(data[..headerEnd]);
+            var contentLength = ParseContentLength(headerText);
+            if (contentLength < 0 || contentLength > MaxRequestBytes)
+            {
+                return null;
+            }
+
+            var totalNeeded = headerEnd + marker.Length + contentLength;
+            if (buffer.Length >= totalNeeded)
+            {
+                return data[..totalNeeded].ToArray();
+            }
+        }
+
+        return null;
+    }
+
+    private static int ParseContentLength(string headerText)
+    {
+        foreach (var line in headerText.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).Skip(1))
+        {
+            var sep = line.IndexOf(':');
+            if (sep <= 0) continue;
+            if (!line[..sep].Trim().Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!int.TryParse(line[(sep + 1)..].Trim(), out var length)) return -1;
+            return length;
+        }
+
+        return 0;
     }
 
     private static bool TryParseRequest(ReadOnlySpan<byte> data, out string method, out string path, out byte[] body)
@@ -103,17 +153,8 @@ public sealed class ReceiverServer : IDisposable
         method = parts[0];
         path = parts[1];
 
-        var contentLength = 0;
-        foreach (var line in lines.Skip(1))
-        {
-            var sep = line.IndexOf(':');
-            if (sep <= 0) continue;
-            if (line[..sep].Trim().Equals("Content-Length", StringComparison.OrdinalIgnoreCase) &&
-                int.TryParse(line[(sep + 1)..].Trim(), out var length))
-            {
-                contentLength = length;
-            }
-        }
+        var contentLength = ParseContentLength(headerText);
+        if (contentLength < 0) return false;
 
         var bodyStart = index + marker.Length;
         if (data.Length < bodyStart + contentLength) return false;
@@ -136,8 +177,10 @@ public sealed class ReceiverServer : IDisposable
         var reason = status switch
         {
             200 => "OK",
+            400 => "Bad Request",
             403 => "Forbidden",
             404 => "Not Found",
+            413 => "Payload Too Large",
             _ => "Error"
         };
         var header = Encoding.ASCII.GetBytes(
