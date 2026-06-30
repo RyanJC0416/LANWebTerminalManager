@@ -12,7 +12,7 @@ namespace LANWebTerminalManager.Services;
 
 public sealed class UpdateManager : INotifyPropertyChanged
 {
-    public const string CurrentVersion = "2.0.4";
+    public const string CurrentVersion = "2.0.5";
 
     private const string LatestReleaseApiUrl = "https://api.github.com/repos/RyanJC0416/LANWebTerminalManager/releases/latest";
     private const string LatestReleasePageUrl = "https://github.com/RyanJC0416/LANWebTerminalManager/releases/latest";
