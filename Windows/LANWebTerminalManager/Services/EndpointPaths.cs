@@ -69,6 +69,36 @@ public static class EndpointPaths
         }
     }
 
+    public static bool IsLogFileAccessible(WebEndpoint endpoint) =>
+        IsLogFileAccessible(LogFile(endpoint));
+
+    public static bool IsLogFileAccessible(string logPath)
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(logPath);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            using var stream = new FileStream(
+                logPath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.ReadWrite);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     private static void TryDeleteFile(string path)
     {
         try

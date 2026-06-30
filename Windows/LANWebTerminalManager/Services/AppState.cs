@@ -441,7 +441,7 @@ public sealed class AppState : INotifyPropertyChanged
                 StopRemoteSync(endpoint, SelectedTarget);
             }
 
-            Thread.Sleep(350);
+            WaitForEndpointRelease(endpoint, TimeSpan.FromSeconds(5));
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
                 IsBusy = false;
@@ -871,12 +871,12 @@ public sealed class AppState : INotifyPropertyChanged
     private int StartLocalSynchronously(WebEndpoint endpoint)
     {
         StopSynchronously(endpoint);
-        Thread.Sleep(350);
+        WaitForEndpointRelease(endpoint, TimeSpan.FromSeconds(5));
 
         var pid = PythonHelper.StartServer(endpoint);
         try { EndpointPaths.TryWritePid(endpoint, pid); } catch (UnauthorizedAccessException) { } catch (IOException) { }
 
-        Thread.Sleep(450);
+        WaitForServerRunning(endpoint, TimeSpan.FromSeconds(5));
         var status = StatusFor(endpoint);
         if (!status.Running)
         {
@@ -912,6 +912,7 @@ public sealed class AppState : INotifyPropertyChanged
         if (filePid is int pid) pids.Add(pid);
 
         var messages = new List<string>();
+        var killedProcesses = new List<System.Diagnostics.Process>();
         if (pids.Count == 0)
         {
             messages.Add("服务未运行");
@@ -922,7 +923,9 @@ public sealed class AppState : INotifyPropertyChanged
             {
                 try
                 {
-                    System.Diagnostics.Process.GetProcessById(target).Kill(true);
+                    var process = System.Diagnostics.Process.GetProcessById(target);
+                    process.Kill(true);
+                    killedProcesses.Add(process);
                     messages.Add($"已发送关闭信号：{target}");
                 }
                 catch (Exception ex)
@@ -932,9 +935,68 @@ public sealed class AppState : INotifyPropertyChanged
             }
         }
 
-        Thread.Sleep(500);
+        foreach (var process in killedProcesses)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.WaitForExit(2000);
+                }
+            }
+            catch
+            {
+                // ignore wait failures for already-exited processes
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+
         EndpointPaths.TryDeletePid(endpoint);
         return messages;
+    }
+
+    private static void WaitForEndpointRelease(WebEndpoint endpoint, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        var logPath = EndpointPaths.LogFile(endpoint);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (NetworkHelper.ListenerPids(endpoint.Port).Count == 0
+                && EndpointPaths.IsLogFileAccessible(endpoint))
+            {
+                return;
+            }
+
+            Thread.Sleep(50);
+        }
+
+        var remainingPids = NetworkHelper.ListenerPids(endpoint.Port);
+        if (remainingPids.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"端口 {endpoint.Port} 仍被进程占用（PID: {string.Join(", ", remainingPids)}），请稍后重试。");
+        }
+
+        throw new InvalidOperationException($"日志文件仍被占用，无法启动服务：{logPath}");
+    }
+
+    private static void WaitForServerRunning(WebEndpoint endpoint, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (NetworkHelper.ListenerPids(endpoint.Port).Count > 0
+                || NetworkHelper.IsPortOpen(endpoint.Host, endpoint.Port))
+            {
+                return;
+            }
+
+            Thread.Sleep(100);
+        }
     }
 
     private EndpointStatus RemoteStatusFor(WebEndpoint endpoint, RemoteTarget target)
@@ -985,10 +1047,21 @@ public sealed class AppState : INotifyPropertyChanged
                     return JsonResponse(403, new Dictionary<string, string> { ["error"] = "接收令牌无效" });
                 }
 
+                WebEndpoint? existingSite = null;
+                if (Guid.TryParse(siteId, out var existingId))
+                {
+                    existingSite = LoadReceiverSites().FirstOrDefault(item => item.Id == existingId);
+                }
+
+                if (existingSite is not null)
+                {
+                    StopSynchronously(existingSite);
+                    WaitForEndpointRelease(existingSite, TimeSpan.FromSeconds(5));
+                }
+
                 var endpoint = ReceiveSite(payload);
                 StartLocalSynchronously(endpoint);
                 System.Windows.Application.Current?.Dispatcher.Invoke(ReloadReceiverSites);
-                Thread.Sleep(500);
                 return EndpointResponse(endpoint);
             }
 
@@ -1025,7 +1098,7 @@ public sealed class AppState : INotifyPropertyChanged
             if (method == "POST" && action == "stop")
             {
                 StopSynchronously(endpointFromSite);
-                Thread.Sleep(500);
+                WaitForEndpointRelease(endpointFromSite, TimeSpan.FromSeconds(5));
                 return EndpointResponse(endpointFromSite);
             }
 
