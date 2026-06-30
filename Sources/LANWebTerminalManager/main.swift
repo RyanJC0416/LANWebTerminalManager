@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import SwiftUI
 
 struct ShellResult {
@@ -83,6 +84,201 @@ struct EndpointStatus: Equatable {
     var updatedAt = "--"
 }
 
+struct RemoteTarget: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var serverURL: String
+    var token: String
+    var platform: String = ""
+
+    var displayHost: String {
+        URL(string: serverURL)?.host ?? serverURL
+    }
+}
+
+struct ReceiverSettings: Codable, Equatable {
+    var rootPath: String
+    var token: String
+    var port: Int = 4177
+
+    static var defaultValue: ReceiverSettings {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents", isDirectory: true)
+        return ReceiverSettings(
+            rootPath: documents.appendingPathComponent("LWM Server", isDirectory: true).path,
+            token: UUID().uuidString
+        )
+    }
+}
+
+struct SiteFilePayload: Codable {
+    var path: String
+    var content: String
+}
+
+struct ReceiverEndpointPayload: Codable {
+    var id: UUID
+    var name: String
+    var port: Int
+    var host: String
+    var urlPath: String
+}
+
+struct ReceiverSyncPayload: Codable {
+    var token: String
+    var endpoint: ReceiverEndpointPayload
+    var files: [SiteFilePayload]
+}
+
+struct ReceiverCommandPayload: Codable {
+    var token: String
+    var command: String?
+}
+
+struct ReceiverSettingsPayload: Codable {
+    var platform: String
+    var protocolVersion: Int
+    var receiverRootPath: String?
+}
+
+struct ReceiverEndpointResponse: Codable {
+    var endpoint: WebEndpoint?
+    var status: EndpointStatusDTO?
+}
+
+struct RemoteCommandResult: Codable {
+    var ok: Bool
+    var status: Int32
+    var stdout: String
+    var stderr: String
+    var output: String
+}
+
+struct EndpointStatusDTO: Codable {
+    var running: Bool
+    var pids: [Int32]
+    var urls: [String]
+    var pageCount: Int
+    var indexMtime: String
+    var logTail: String
+    var updatedAt: String
+
+    var status: EndpointStatus {
+        EndpointStatus(
+            running: running,
+            pids: pids,
+            urls: urls,
+            pageCount: pageCount,
+            indexMtime: indexMtime,
+            logTail: logTail,
+            updatedAt: updatedAt
+        )
+    }
+
+    init(_ status: EndpointStatus) {
+        running = status.running
+        pids = status.pids
+        urls = status.urls
+        pageCount = status.pageCount
+        indexMtime = status.indexMtime
+        logTail = status.logTail
+        updatedAt = status.updatedAt
+    }
+}
+
+final class ReceiverServer: @unchecked Sendable {
+    typealias Handler = @Sendable (String, String, Data) async -> (Int, Data)
+
+    private var listener: NWListener?
+    private let handler: Handler
+
+    init(handler: @escaping Handler) {
+        self.handler = handler
+    }
+
+    func start(port: Int) throws {
+        stop()
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: UInt16(port))!)
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection)
+        }
+        listener.start(queue: .global(qos: .userInitiated))
+        self.listener = listener
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+    }
+
+    private func handle(_ connection: NWConnection) {
+        connection.start(queue: .global(qos: .userInitiated))
+        receive(on: connection, buffer: Data())
+    }
+
+    private func receive(on connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            var next = buffer
+            if let data { next.append(data) }
+            if error != nil || isComplete {
+                connection.cancel()
+                return
+            }
+            if let request = Self.parseRequest(next) {
+                Task {
+                    let (status, body) = await self.handler(request.method, request.path, request.body)
+                    self.send(status: status, body: body, on: connection)
+                }
+            } else {
+                self.receive(on: connection, buffer: next)
+            }
+        }
+    }
+
+    private func send(status: Int, body: Data, on connection: NWConnection) {
+        let reason = status == 200 ? "OK" : status == 403 ? "Forbidden" : status == 404 ? "Not Found" : "Error"
+        let header = """
+        HTTP/1.1 \(status) \(reason)\r
+        Content-Type: application/json; charset=utf-8\r
+        Content-Length: \(body.count)\r
+        Cache-Control: no-store\r
+        Connection: close\r
+        \r
+        """
+        var response = Data(header.utf8)
+        response.append(body)
+        connection.send(content: response, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
+    }
+
+    private static func parseRequest(_ data: Data) -> (method: String, path: String, body: Data)? {
+        guard let range = data.range(of: Data("\r\n\r\n".utf8)),
+              let header = String(data: data[..<range.lowerBound], encoding: .utf8) else {
+            return nil
+        }
+        let lines = header.components(separatedBy: "\r\n")
+        guard let requestLine = lines.first else { return nil }
+        let parts = requestLine.split(separator: " ")
+        guard parts.count >= 2 else { return nil }
+        let contentLength = lines.compactMap { line -> Int? in
+            let pieces = line.split(separator: ":", maxSplits: 1).map(String.init)
+            guard pieces.count == 2, pieces[0].lowercased() == "content-length" else { return nil }
+            return Int(pieces[1].trimmingCharacters(in: .whitespaces))
+        }.first ?? 0
+        let bodyStart = range.upperBound
+        guard data.count >= bodyStart + contentLength else { return nil }
+        return (String(parts[0]), String(parts[1]), data[bodyStart..<(bodyStart + contentLength)])
+    }
+}
+
+private final class RequestResultBox: @unchecked Sendable {
+    var result: Result<(Data, HTTPURLResponse), Error>?
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var endpoints: [WebEndpoint] = []
@@ -92,8 +288,16 @@ final class AppState: ObservableObject {
     @Published var command = ""
     @Published var terminalOutput = "选择一个网页目录后，可以在这里执行维护命令。"
     @Published var isBusy = false
+    @Published var targets: [RemoteTarget] = []
+    @Published var selectedTargetID: UUID?
+    @Published var receiverSettings = ReceiverSettings.defaultValue
+    @Published var isShowingSettings = false
 
     private let configURL: URL
+    private let targetsURL: URL
+    private let receiverSettingsURL: URL
+    private let receiverSitesURL: URL
+    private var receiverServer: ReceiverServer?
     private var timer: Timer?
     nonisolated private static let noCacheHTTPServerScript = """
 import http.server
@@ -121,11 +325,20 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
             .appendingPathComponent("LANWebTerminalManager", isDirectory: true)
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         configURL = support.appendingPathComponent("endpoints.json")
+        targetsURL = support.appendingPathComponent("targets.json")
+        receiverSettingsURL = support.appendingPathComponent("settings.json")
+        receiverSitesURL = support.appendingPathComponent("receiver-sites.json")
+        receiverServer = ReceiverServer { [weak self] method, path, body in
+            await self?.handleReceiverRequest(method: method, path: path, body: body) ?? Self.jsonResponse(500, ["error": "接收方未就绪"])
+        }
         load()
+        loadTargets()
+        loadReceiverSettings()
         if endpoints.isEmpty {
             seedDefaultEndpoints()
         }
         selection = endpoints.first?.id
+        startReceiverServer()
         refreshAll()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshAll() }
@@ -135,6 +348,23 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
     var selectedEndpoint: WebEndpoint? {
         guard let selection else { return nil }
         return endpoints.first { $0.id == selection }
+    }
+
+    var selectedTarget: RemoteTarget? {
+        guard let selectedTargetID else { return nil }
+        return targets.first { $0.id == selectedTargetID }
+    }
+
+    var isLocalTargetSelected: Bool {
+        selectedTargetID == nil
+    }
+
+    var receiverLocalURL: String {
+        "http://127.0.0.1:\(receiverSettings.port)"
+    }
+
+    var receiverLANURLs: [String] {
+        lanIPs().map { "http://\($0):\(receiverSettings.port)" }
     }
 
     func endpointBinding(_ id: UUID) -> Binding<WebEndpoint>? {
@@ -147,6 +377,18 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
                 self.refresh(newValue)
             }
         )
+    }
+
+    func selectLocalTarget() {
+        selectedTargetID = nil
+        refreshAll()
+        activity = "目标已切换：local"
+    }
+
+    func selectTarget(_ target: RemoteTarget) {
+        selectedTargetID = target.id
+        refreshAll()
+        activity = "目标已切换：\(target.name)"
     }
 
     func addEndpoint() {
@@ -196,9 +438,10 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
 
     func refreshAll() {
         let snapshot = endpoints
+        let target = selectedTarget
         DispatchQueue.global(qos: .utility).async {
             let results = snapshot.map { endpoint in
-                (endpoint.id, self.status(for: endpoint))
+                (endpoint.id, target == nil ? self.status(for: endpoint) : self.remoteStatus(for: endpoint, target: target!))
             }
             DispatchQueue.main.async {
                 let existingIDs = Set(self.endpoints.map(\.id))
@@ -210,12 +453,26 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
     }
 
     func refresh(_ endpoint: WebEndpoint) {
+        let target = selectedTarget
         DispatchQueue.global(qos: .utility).async {
-            let status = self.status(for: endpoint)
+            let status = target == nil ? self.status(for: endpoint) : self.remoteStatus(for: endpoint, target: target!)
             DispatchQueue.main.async {
                 guard self.endpoints.contains(where: { $0.id == endpoint.id }) else { return }
                 self.statuses[endpoint.id] = status
             }
+        }
+    }
+
+    nonisolated private func remoteStatus(for endpoint: WebEndpoint, target: RemoteTarget) -> EndpointStatus {
+        guard let url = URL(string: "\(target.serverURL.trimmedSlash)/api/receiver/sites/\(endpoint.id.uuidString)/status?token=\(target.token.urlQueryEscaped)") else {
+            return EndpointStatus(logTail: "目标服务器地址无效")
+        }
+        do {
+            let data = try Self.request(url: url, method: "GET")
+            let response = try JSONDecoder().decode(ReceiverEndpointResponse.self, from: data)
+            return response.status?.status ?? EndpointStatus(logTail: "目标服务器没有返回状态")
+        } catch {
+            return EndpointStatus(logTail: "无法连接目标服务器：\(error.localizedDescription)")
         }
     }
 
@@ -261,7 +518,11 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         }
     }
 
-    func start(_ endpoint: WebEndpoint, reason: String = "已启动") {
+    func start(_ endpoint: WebEndpoint, reason: String = "已启动", forceLocal: Bool = false) {
+        if !forceLocal, let target = selectedTarget {
+            startRemote(endpoint, target: target)
+            return
+        }
         if statuses[endpoint.id]?.running == true {
             activity = "\(endpoint.name) 已在运行"
             return
@@ -300,7 +561,46 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         }
     }
 
-    func stop(_ endpoint: WebEndpoint) {
+    func startRemote(_ endpoint: WebEndpoint, target: RemoteTarget) {
+        guard FileManager.default.fileExists(atPath: endpoint.rootPath) else {
+            activity = "目录不存在：\(endpoint.rootPath)"
+            return
+        }
+        isBusy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let payload = ReceiverSyncPayload(
+                    token: target.token,
+                    endpoint: ReceiverEndpointPayload(id: endpoint.id, name: endpoint.name, port: endpoint.port, host: endpoint.host, urlPath: endpoint.urlPath),
+                    files: try self.collectSiteFiles(rootPath: endpoint.rootPath)
+                )
+                let body = try JSONEncoder().encode(payload)
+                let url = URL(string: "\(target.serverURL.trimmedSlash)/api/receiver/sites/\(endpoint.id.uuidString)/sync-start")!
+                let data = try Self.request(url: url, method: "POST", body: body)
+                let response = try JSONDecoder().decode(ReceiverEndpointResponse.self, from: data)
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    self.statuses[endpoint.id] = response.status?.status
+                    self.activity = "已在 \(target.name) 启动：\(endpoint.name)"
+                    if endpoint.autoOpen, let url = response.status?.urls.first.flatMap(URL.init(string:)) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    self.activity = "远端启动失败：\(error.localizedDescription)"
+                    self.refresh(endpoint)
+                }
+            }
+        }
+    }
+
+    func stop(_ endpoint: WebEndpoint, forceLocal: Bool = false) {
+        if !forceLocal, let target = selectedTarget {
+            stopRemote(endpoint, target: target)
+            return
+        }
         isBusy = true
         DispatchQueue.global(qos: .userInitiated).async {
             let messages = self.stopSynchronously(endpoint)
@@ -310,6 +610,29 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
                     self.refresh(endpoint)
                 }
                 self.activity = "\(endpoint.name)：\(messages.joined(separator: "，"))"
+            }
+        }
+    }
+
+    func stopRemote(_ endpoint: WebEndpoint, target: RemoteTarget) {
+        isBusy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let body = try JSONEncoder().encode(ReceiverCommandPayload(token: target.token, command: nil))
+                let url = URL(string: "\(target.serverURL.trimmedSlash)/api/receiver/sites/\(endpoint.id.uuidString)/stop")!
+                let data = try Self.request(url: url, method: "POST", body: body)
+                let response = try JSONDecoder().decode(ReceiverEndpointResponse.self, from: data)
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    self.statuses[endpoint.id] = response.status?.status
+                    self.activity = "已停止 \(target.name)：\(endpoint.name)"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    self.activity = "远端停止失败：\(error.localizedDescription)"
+                    self.refresh(endpoint)
+                }
             }
         }
     }
@@ -421,6 +744,31 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         terminalOutput += "\n\n$ \(trimmed)"
         command = ""
         isBusy = true
+        if let target = selectedTarget {
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let payload = ReceiverCommandPayload(token: target.token, command: trimmed)
+                    let body = try JSONEncoder().encode(payload)
+                    let url = URL(string: "\(target.serverURL.trimmedSlash)/api/receiver/sites/\(endpoint.id.uuidString)/command")!
+                    let data = try Self.request(url: url, method: "POST", body: body)
+                    let result = try JSONDecoder().decode(RemoteCommandResult.self, from: data)
+                    DispatchQueue.main.async {
+                        self.isBusy = false
+                        self.terminalOutput += "\n\(result.output.isEmpty ? "(无输出)" : result.output)"
+                        self.activity = result.ok ? "命令完成" : "命令失败，退出码 \(result.status)"
+                        self.refresh(endpoint)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.isBusy = false
+                        self.terminalOutput += "\n\(error.localizedDescription)"
+                        self.activity = "远端命令失败"
+                        self.refresh(endpoint)
+                    }
+                }
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Shell.run("/bin/zsh", args: ["-lc", trimmed], cwd: endpoint.rootPath)
             let text = [result.stdout, result.stderr].filter { !$0.isEmpty }.joined(separator: "\n")
@@ -442,12 +790,99 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
         }
     }
 
+    func saveTargets() {
+        do {
+            let data = try JSONEncoder.pretty.encode(targets)
+            try data.write(to: targetsURL, options: .atomic)
+        } catch {
+            activity = "保存目标服务器失败：\(error.localizedDescription)"
+        }
+    }
+
+    func saveReceiverSettings() {
+        do {
+            try FileManager.default.createDirectory(atPath: receiverSettings.rootPath, withIntermediateDirectories: true)
+            let data = try JSONEncoder.pretty.encode(receiverSettings)
+            try data.write(to: receiverSettingsURL, options: .atomic)
+            startReceiverServer()
+            activity = "已保存接收方设置"
+        } catch {
+            activity = "保存接收方设置失败：\(error.localizedDescription)"
+        }
+    }
+
+    func addTarget() {
+        targets.append(RemoteTarget(name: "新服务器", serverURL: "http://192.168.1.20:4177", token: ""))
+        selectedTargetID = targets.last?.id
+        saveTargets()
+    }
+
+    func removeTarget(_ target: RemoteTarget) {
+        targets.removeAll { $0.id == target.id }
+        if selectedTargetID == target.id {
+            selectedTargetID = nil
+        }
+        saveTargets()
+        refreshAll()
+    }
+
+    func probeTarget(_ target: RemoteTarget) {
+        guard let index = targets.firstIndex(where: { $0.id == target.id }),
+              let url = URL(string: "\(target.serverURL.trimmedSlash)/api/settings") else { return }
+        isBusy = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let data = try Self.request(url: url, method: "GET")
+                let payload = try JSONDecoder().decode(ReceiverSettingsPayload.self, from: data)
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    self.targets[index].platform = payload.platform
+                    self.saveTargets()
+                    self.activity = "已连接：\(self.targets[index].name)（\(payload.platform)）"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    self.activity = "连接目标失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     private func load() {
         do {
             let data = try Data(contentsOf: configURL)
             endpoints = try JSONDecoder().decode([WebEndpoint].self, from: data)
         } catch {
             endpoints = []
+        }
+    }
+
+    private func loadTargets() {
+        do {
+            let data = try Data(contentsOf: targetsURL)
+            targets = try JSONDecoder().decode([RemoteTarget].self, from: data)
+        } catch {
+            targets = []
+        }
+    }
+
+    private func loadReceiverSettings() {
+        do {
+            let data = try Data(contentsOf: receiverSettingsURL)
+            receiverSettings = try JSONDecoder().decode(ReceiverSettings.self, from: data)
+        } catch {
+            receiverSettings = .defaultValue
+            saveReceiverSettings()
+        }
+        try? FileManager.default.createDirectory(atPath: receiverSettings.rootPath, withIntermediateDirectories: true)
+    }
+
+    private func startReceiverServer() {
+        do {
+            try receiverServer?.start(port: receiverSettings.port)
+        } catch {
+            activity = "接收方服务启动失败：\(error.localizedDescription)"
         }
     }
 
@@ -461,6 +896,187 @@ with ReusableThreadingTCPServer((host, port), NoCacheHandler) as httpd:
             return WebEndpoint(name: item.name, rootPath: item.path, port: item.port, urlPath: item.urlPath)
         }
         save()
+    }
+
+    nonisolated private func collectSiteFiles(rootPath: String) throws -> [SiteFilePayload] {
+        guard let enumerator = FileManager.default.enumerator(atPath: rootPath) else { return [] }
+        var files: [SiteFilePayload] = []
+        for case let relativePath as String in enumerator {
+            let lower = relativePath.lowercased()
+            if lower.hasPrefix(".git/") || lower.hasPrefix("node_modules/") || lower.hasPrefix("build/") || lower.hasPrefix(".build/") {
+                continue
+            }
+            let fullPath = URL(fileURLWithPath: rootPath).appendingPathComponent(relativePath).path
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDirectory), !isDirectory.boolValue else { continue }
+            let data = try Data(contentsOf: URL(fileURLWithPath: fullPath))
+            files.append(SiteFilePayload(path: relativePath.split(separator: "/").joined(separator: "/"), content: data.base64EncodedString()))
+        }
+        return files
+    }
+
+    nonisolated static func request(url: URL, method: String, body: Data? = nil) throws -> Data {
+        var request = URLRequest(url: url, timeoutInterval: 90)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = RequestResultBox()
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            if let error {
+                box.result = .failure(error)
+                return
+            }
+            guard let response = response as? HTTPURLResponse else {
+                box.result = .failure(NSError(domain: "LWM", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效响应"]))
+                return
+            }
+            box.result = .success((data ?? Data(), response))
+        }.resume()
+        semaphore.wait()
+
+        let (data, response) = try box.result!.get()
+        guard (200..<300).contains(response.statusCode) else {
+            let message = (try? JSONDecoder().decode([String: String].self, from: data)["error"]) ?? "请求失败：\(response.statusCode)"
+            throw NSError(domain: "LWM", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        return data
+    }
+
+    private func handleReceiverRequest(method: String, path: String, body: Data) async -> (Int, Data) {
+        if method == "GET", path == "/api/settings" {
+            return Self.encodableResponse(200, ReceiverSettingsPayload(platform: "darwin", protocolVersion: 1, receiverRootPath: nil))
+        }
+
+        let parts = path.split(separator: "?").first?.split(separator: "/").map(String.init) ?? []
+        guard parts.count >= 5, parts[0] == "api", parts[1] == "receiver", parts[2] == "sites" else {
+            return Self.jsonResponse(404, ["error": "未知 API"])
+        }
+        let siteID = parts[3]
+        let action = parts[4]
+
+        do {
+            if method == "POST", action == "sync-start" {
+                let payload = try JSONDecoder().decode(ReceiverSyncPayload.self, from: body)
+                guard payload.token == receiverSettings.token else { return Self.jsonResponse(403, ["error": "接收令牌无效"]) }
+                let endpoint = try receiveSite(payload)
+                start(endpoint, forceLocal: true)
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                return endpointResponse(endpoint)
+            }
+
+            let payload = try? JSONDecoder().decode(ReceiverCommandPayload.self, from: body)
+            let token = payload?.token ?? URLComponents(string: "http://localhost\(path)")?.queryItems?.first(where: { $0.name == "token" })?.value ?? ""
+            guard token == receiverSettings.token else { return Self.jsonResponse(403, ["error": "接收令牌无效"]) }
+            guard let id = UUID(uuidString: siteID),
+                  let endpoint = loadReceiverSites().first(where: { $0.id == id }) else {
+                return Self.jsonResponse(404, ["error": "接收方未找到该站点"])
+            }
+
+            if method == "GET", action == "status" {
+                return endpointResponse(endpoint)
+            }
+            if method == "POST", action == "stop" {
+                stop(endpoint, forceLocal: true)
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                return endpointResponse(endpoint)
+            }
+            if method == "POST", action == "command" {
+                let command = payload?.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !command.isEmpty else { return Self.jsonResponse(400, ["error": "请输入命令"]) }
+                let result = Shell.run("/bin/zsh", args: ["-lc", command], cwd: endpoint.rootPath)
+                let output = [result.stdout, result.stderr].filter { !$0.isEmpty }.joined(separator: "\n")
+                return Self.encodableResponse(200, RemoteCommandResult(
+                    ok: result.ok,
+                    status: result.exitCode,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    output: output.isEmpty ? "(无输出)" : output
+                ))
+            }
+            return Self.jsonResponse(404, ["error": "未知 API"])
+        } catch {
+            return Self.jsonResponse(500, ["error": error.localizedDescription])
+        }
+    }
+
+    private func receiveSite(_ payload: ReceiverSyncPayload) throws -> WebEndpoint {
+        let siteName = sanitizeSiteName(payload.endpoint.name)
+        let rootURL = URL(fileURLWithPath: receiverSettings.rootPath, isDirectory: true).appendingPathComponent(siteName, isDirectory: true)
+        try? FileManager.default.removeItem(at: rootURL)
+        try FileManager.default.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        for file in payload.files {
+            let targetURL = try safeReceiverFile(root: rootURL, relativePath: file.path)
+            try FileManager.default.createDirectory(at: targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            guard let data = Data(base64Encoded: file.content) else { continue }
+            try data.write(to: targetURL, options: .atomic)
+        }
+        let endpoint = WebEndpoint(
+            id: payload.endpoint.id,
+            name: payload.endpoint.name,
+            rootPath: rootURL.path,
+            port: payload.endpoint.port,
+            host: payload.endpoint.host,
+            urlPath: payload.endpoint.urlPath,
+            autoOpen: false
+        )
+        var sites = loadReceiverSites()
+        sites.removeAll { $0.id == endpoint.id }
+        sites.append(endpoint)
+        saveReceiverSites(sites)
+        return endpoint
+    }
+
+    private func loadReceiverSites() -> [WebEndpoint] {
+        do {
+            let data = try Data(contentsOf: receiverSitesURL)
+            return try JSONDecoder().decode([WebEndpoint].self, from: data)
+        } catch {
+            return []
+        }
+    }
+
+    private func saveReceiverSites(_ sites: [WebEndpoint]) {
+        if let data = try? JSONEncoder.pretty.encode(sites) {
+            try? data.write(to: receiverSitesURL, options: .atomic)
+        }
+    }
+
+    private func safeReceiverFile(root: URL, relativePath: String) throws -> URL {
+        let normalized = relativePath.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        guard !normalized.isEmpty,
+              !normalized.contains(".."),
+              !relativePath.contains(":"),
+              !relativePath.hasPrefix("/") else {
+            throw NSError(domain: "LWM", code: 400, userInfo: [NSLocalizedDescriptionKey: "非法文件路径：\(relativePath)"])
+        }
+        return normalized.reduce(root) { $0.appendingPathComponent($1) }
+    }
+
+    private func sanitizeSiteName(_ value: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+        let mapped = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        let name = String(mapped).trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return name.isEmpty ? "site" : name
+    }
+
+    private func endpointResponse(_ endpoint: WebEndpoint) -> (Int, Data) {
+        let status = EndpointStatusDTO(status(for: endpoint))
+        let response = ReceiverEndpointResponse(endpoint: endpoint, status: status)
+        return (200, (try? JSONEncoder().encode(response)) ?? Data("{}".utf8))
+    }
+
+    nonisolated static func jsonResponse(_ status: Int, _ body: [String: String]) -> (Int, Data) {
+        (status, (try? JSONEncoder().encode(body)) ?? Data("{}".utf8))
+    }
+
+    nonisolated static func encodableResponse<T: Encodable>(_ status: Int, _ body: T) -> (Int, Data) {
+        (status, (try? JSONEncoder().encode(body)) ?? Data("{}".utf8))
     }
 
     nonisolated private func listenerPids(port: Int) -> [Int32] {
@@ -586,9 +1202,19 @@ struct ContentView: View {
                 Button(action: state.refreshAll) {
                     Label("刷新", systemImage: "arrow.clockwise")
                 }
+                Button {
+                    state.isShowingSettings = true
+                } label: {
+                    Label("设置", systemImage: "gearshape")
+                }
             }
         }
         .onDeleteCommand(perform: state.removeSelected)
+        .sheet(isPresented: $state.isShowingSettings) {
+            SettingsView()
+                .environmentObject(state)
+                .frame(width: 720, height: 560)
+        }
         .alert("应用更新", isPresented: $updateManager.isPresentingMessage) {
             if updateManager.canRetry {
                 Button("重试") { updateManager.retryLastFailedAction() }
@@ -623,6 +1249,9 @@ struct ContentView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            targetPicker
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
             List(selection: $state.selection) {
                 ForEach(state.endpoints) { endpoint in
                     SidebarRow(endpoint: endpoint, status: state.statuses[endpoint.id])
@@ -678,6 +1307,44 @@ struct ContentView: View {
             }
             .padding(10)
         }
+    }
+
+    private var targetPicker: some View {
+        Menu {
+            Button {
+                state.selectLocalTarget()
+            } label: {
+                Label("local", systemImage: state.isLocalTargetSelected ? "checkmark.circle.fill" : "desktopcomputer")
+            }
+            Divider()
+            ForEach(state.targets) { target in
+                Button {
+                    state.selectTarget(target)
+                } label: {
+                    Label(target.name, systemImage: state.selectedTargetID == target.id ? "checkmark.circle.fill" : "server.rack")
+                }
+            }
+            Divider()
+            Button {
+                state.isShowingSettings = true
+            } label: {
+                Label("管理目标服务器", systemImage: "gearshape")
+            }
+        } label: {
+            HStack {
+                Image(systemName: state.isLocalTargetSelected ? "desktopcomputer" : "server.rack")
+                Text(state.selectedTarget?.name ?? "local")
+                    .lineLimit(1)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(8)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -991,6 +1658,160 @@ struct StatTile: View {
         .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct SettingsView: View {
+    @EnvironmentObject private var state: AppState
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("设置")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button("完成") {
+                    state.saveReceiverSettings()
+                    state.saveTargets()
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(18)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    receiverSection
+                    targetsSection
+                }
+                .padding(18)
+            }
+        }
+    }
+
+    private var receiverSection: some View {
+        GroupBox("本机作为接收方") {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                GridRow {
+                    Text("文件根目录")
+                    HStack {
+                        TextField("接收文件根目录", text: $state.receiverSettings.rootPath)
+                            .textFieldStyle(.roundedBorder)
+                        Button {
+                            chooseReceiverRoot()
+                        } label: {
+                            Label("选择", systemImage: "folder")
+                        }
+                    }
+                }
+                GridRow {
+                    Text("接收端口")
+                    Stepper(value: $state.receiverSettings.port, in: 1024...65535) {
+                        TextField("端口", value: $state.receiverSettings.port, formatter: NumberFormatter.port)
+                            .frame(width: 90)
+                    }
+                }
+                GridRow {
+                    Text("接收令牌")
+                    HStack {
+                        SecureField("接收令牌", text: $state.receiverSettings.token)
+                            .textFieldStyle(.roundedBorder)
+                        Button {
+                            state.receiverSettings.token = UUID().uuidString
+                        } label: {
+                            Label("重置", systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
+                GridRow {
+                    Text("本机地址")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(state.receiverLocalURL)
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
+                        ForEach(state.receiverLANURLs, id: \.self) { url in
+                            Text(url)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            HStack {
+                Button {
+                    state.saveReceiverSettings()
+                } label: {
+                    Label("保存接收方设置", systemImage: "externaldrive.badge.checkmark")
+                }
+                Spacer()
+            }
+            .padding(.top, 8)
+        }
+    }
+
+    private var targetsSection: some View {
+        GroupBox("管理方目标客户端") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Button {
+                        state.addTarget()
+                    } label: {
+                        Label("添加目标", systemImage: "plus")
+                    }
+                    Spacer()
+                }
+                ForEach($state.targets) { $target in
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            TextField("名称", text: $target.name)
+                                .textFieldStyle(.roundedBorder)
+                            Button {
+                                state.probeTarget(target)
+                            } label: {
+                                Label("测试", systemImage: "network")
+                            }
+                            Button(role: .destructive) {
+                                state.removeTarget(target)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                        }
+                        TextField("LWM 客户端地址，例如 http://192.168.1.20:4177", text: $target.serverURL)
+                            .textFieldStyle(.roundedBorder)
+                        SecureField("接收令牌", text: $target.token)
+                            .textFieldStyle(.roundedBorder)
+                        if !target.platform.isEmpty {
+                            Text("平台：\(target.platform)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                Button {
+                    state.saveTargets()
+                } label: {
+                    Label("保存目标服务器", systemImage: "tray.and.arrow.down")
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func chooseReceiverRoot() {
+        let panel = NSOpenPanel()
+        panel.title = "选择接收方文件根目录"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            state.receiverSettings.rootPath = url.path
+        }
     }
 }
 
@@ -1591,6 +2412,20 @@ extension NumberFormatter {
         formatter.allowsFloats = false
         return formatter
     }()
+}
+
+extension String {
+    var trimmedSlash: String {
+        var value = trimmingCharacters(in: .whitespacesAndNewlines)
+        while value.hasSuffix("/") {
+            value.removeLast()
+        }
+        return value
+    }
+
+    var urlQueryEscaped: String {
+        addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? self
+    }
 }
 
 func dictUnique<S: Sequence>(_ values: S) -> [S.Element] where S.Element: Hashable {
