@@ -12,6 +12,10 @@ public sealed class WebEndpoint
     public string UrlPath { get; set; } = "/";
     public bool AutoOpen { get; set; }
 
+    /// <summary>null 表示 local 分类；非 null 表示对应远程目标分类。</summary>
+    [JsonPropertyName("targetID")]
+    public Guid? TargetId { get; set; }
+
     [JsonIgnore]
     public string HostPortLabel => $"{Host}:{Port}";
 }

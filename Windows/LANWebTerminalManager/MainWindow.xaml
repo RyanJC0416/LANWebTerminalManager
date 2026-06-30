@@ -54,7 +54,8 @@
                          BorderThickness="0"
                          Background="Transparent"
                          Padding="8"
-                         SelectionChanged="EndpointList_SelectionChanged">
+                         SelectionChanged="EndpointList_SelectionChanged"
+                         ContextMenuOpening="EndpointList_ContextMenuOpening">
                     <ListBox.ItemTemplate>
                         <DataTemplate>
                             <Grid Margin="0,4,0,0">
@@ -163,9 +164,11 @@
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
                                     <TextBlock x:Name="UrlPathText" FontFamily="Consolas" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MouseLeftButtonUp="ChooseHomepage_Click" Cursor="Hand"/>
-                                    <Button Grid.Column="1" Content="选择主页" Margin="8,0,0,0" Click="ChooseHomepage_Click"/>
+                                    <Button Grid.Column="1" Content="部署测试页" Margin="0,0,8,0" Click="DeployTestHtml_Click"/>
+                                    <Button Grid.Column="2" Content="选择主页" Click="ChooseHomepage_Click"/>
                                 </Grid>
 
                                 <CheckBox Grid.Row="4" Grid.Column="1" x:Name="AutoOpenInput" Content="启动后自动打开" Checked="EndpointField_Changed" Unchecked="EndpointField_Changed"/>

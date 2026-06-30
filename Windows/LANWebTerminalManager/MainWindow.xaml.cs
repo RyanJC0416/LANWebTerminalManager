@@ -19,12 +19,16 @@ public partial class MainWindow : Window
         InitializeComponent();
         _state = new AppState();
         VersionText.Text = $"当前版本 {UpdateManager.CurrentVersion}";
-        EndpointList.ItemsSource = _state.Endpoints;
+        RefreshEndpointListSource();
         _state.PropertyChanged += (_, args) =>
         {
             if (args.PropertyName is nameof(AppState.Activity))
             {
                 ActivityText.Text = _state.Activity;
+            }
+            else if (args.PropertyName is nameof(AppState.VisibleEndpoints))
+            {
+                RefreshEndpointListSource();
             }
             else if (args.PropertyName is nameof(AppState.IsBusy))
             {
@@ -111,6 +115,7 @@ public partial class MainWindow : Window
         if (_suppressFieldChanges || TargetPicker.SelectedItem is not TargetPickerItem item) return;
         if (item.TargetId is null) _state.SelectLocalTarget();
         else if (_state.Targets.FirstOrDefault(target => target.Id == item.TargetId) is { } target) _state.SelectTarget(target);
+        RefreshEndpointListSource();
     }
 
     private void OpenSettings_Click(object sender, RoutedEventArgs e)
@@ -118,6 +123,89 @@ public partial class MainWindow : Window
         var window = new SettingsWindow(_state) { Owner = this };
         window.ShowDialog();
         RefreshTargetPicker();
+    }
+
+    private void RefreshEndpointListSource()
+    {
+        EndpointList.ItemsSource = _state.VisibleEndpoints.ToList();
+        RefreshEndpointListVisuals();
+    }
+
+    private void EndpointList_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        if (EndpointList.SelectedItem is not WebEndpoint endpoint)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        var menu = new ContextMenu();
+
+        var transferMenu = new MenuItem { Header = "转移至分类" };
+        var localTransfer = new MenuItem { Header = "local", IsEnabled = endpoint.TargetId is not null };
+        localTransfer.Click += (_, _) =>
+        {
+            _state.TransferEndpoint(endpoint, null);
+            RefreshEndpointListSource();
+            RenderDetail();
+        };
+        transferMenu.Items.Add(localTransfer);
+        foreach (var target in _state.Targets)
+        {
+            var targetItem = new MenuItem
+            {
+                Header = target.Name,
+                IsEnabled = endpoint.TargetId != target.Id
+            };
+            var targetId = target.Id;
+            targetItem.Click += (_, _) =>
+            {
+                _state.TransferEndpoint(endpoint, targetId);
+                RefreshEndpointListSource();
+                RenderDetail();
+            };
+            transferMenu.Items.Add(targetItem);
+        }
+        menu.Items.Add(transferMenu);
+
+        var copyMenu = new MenuItem { Header = "复制至分类" };
+        var localCopy = new MenuItem { Header = "local" };
+        localCopy.Click += (_, _) =>
+        {
+            _state.CopyEndpoint(endpoint, null);
+            RefreshEndpointListSource();
+        };
+        copyMenu.Items.Add(localCopy);
+        foreach (var target in _state.Targets)
+        {
+            var targetItem = new MenuItem { Header = target.Name };
+            var targetId = target.Id;
+            targetItem.Click += (_, _) =>
+            {
+                _state.CopyEndpoint(endpoint, targetId);
+                RefreshEndpointListSource();
+            };
+            copyMenu.Items.Add(targetItem);
+        }
+        menu.Items.Add(copyMenu);
+        menu.Items.Add(new Separator());
+
+        var deleteItem = new MenuItem { Header = "删除" };
+        deleteItem.Click += (_, _) =>
+        {
+            _state.Remove(endpoint);
+            RefreshEndpointListSource();
+            RenderDetail();
+        };
+        menu.Items.Add(deleteItem);
+
+        EndpointList.ContextMenu = menu;
+    }
+
+    private void DeployTestHtml_Click(object sender, RoutedEventArgs e)
+    {
+        _state.DeployTestHtml();
+        RenderDetail();
     }
 
     private void AddEndpoint_Click(object sender, RoutedEventArgs e)
@@ -131,8 +219,7 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.FolderName))
         {
             _state.AddEndpoint(dialog.FolderName);
-            EndpointList.SelectedItem = _state.SelectedEndpoint;
-            RefreshEndpointListVisuals();
+            RefreshEndpointListSource();
             RenderDetail();
         }
     }
@@ -148,7 +235,7 @@ public partial class MainWindow : Window
         if (result != MessageBoxResult.Yes) return;
 
         _state.RemoveSelected();
-        RefreshEndpointListVisuals();
+        RefreshEndpointListSource();
         RenderDetail();
     }
 

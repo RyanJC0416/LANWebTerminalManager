@@ -54,7 +54,7 @@ public sealed class AppState : INotifyPropertyChanged
             SeedDefaultEndpoints();
         }
 
-        Selection = Endpoints.FirstOrDefault()?.Id;
+        Selection = VisibleEndpoints.FirstOrDefault()?.Id;
         StartReceiverServer();
         RefreshAll();
 
@@ -110,6 +110,9 @@ public sealed class AppState : INotifyPropertyChanged
 
     public string SelectedTargetLabel => SelectedTarget?.Name ?? "local";
 
+    public IEnumerable<WebEndpoint> VisibleEndpoints =>
+        Endpoints.Where(item => item.TargetId == SelectedTargetId);
+
     public string ReceiverLocalUrl => $"http://127.0.0.1:{ReceiverSettings.Port}";
 
     public IEnumerable<string> ReceiverLanUrls =>
@@ -148,16 +151,108 @@ public sealed class AppState : INotifyPropertyChanged
     public void SelectLocalTarget()
     {
         SelectedTargetId = null;
+        SyncSelectionToVisibleCategory();
         RefreshAll();
         Activity = "目标已切换：local";
+        NotifyVisibleEndpointsChanged();
     }
 
     public void SelectTarget(RemoteTarget target)
     {
         SelectedTargetId = target.Id;
+        SyncSelectionToVisibleCategory();
         RefreshAll();
         Activity = $"目标已切换：{target.Name}";
+        NotifyVisibleEndpointsChanged();
     }
+
+    public void SyncSelectionToVisibleCategory()
+    {
+        var visible = VisibleEndpoints.ToList();
+        if (Selection is Guid id && visible.Any(item => item.Id == id))
+        {
+            return;
+        }
+
+        Selection = visible.FirstOrDefault()?.Id;
+    }
+
+    public string TargetName(Guid? targetId) =>
+        targetId is null ? "local" : Targets.FirstOrDefault(item => item.Id == targetId)?.Name ?? "未知分类";
+
+    public void TransferEndpoint(WebEndpoint endpoint, Guid? toTargetId)
+    {
+        var index = Endpoints.IndexOf(endpoint);
+        if (index < 0 || Endpoints[index].TargetId == toTargetId) return;
+
+        Endpoints[index].TargetId = toTargetId;
+        Save();
+        SyncSelectionToVisibleCategory();
+        NotifyVisibleEndpointsChanged();
+        Activity = $"已转移至 {TargetName(toTargetId)}：{endpoint.Name}";
+    }
+
+    public void CopyEndpoint(WebEndpoint endpoint, Guid? toTargetId)
+    {
+        if (Endpoints.FirstOrDefault(item => item.Id == endpoint.Id) is not { } source) return;
+
+        var copy = new WebEndpoint
+        {
+            Id = Guid.NewGuid(),
+            Name = source.Name,
+            RootPath = source.RootPath,
+            Port = NextAvailablePort(),
+            Host = source.Host,
+            UrlPath = source.UrlPath,
+            AutoOpen = source.AutoOpen,
+            TargetId = toTargetId
+        };
+        Endpoints.Add(copy);
+        Save();
+        NotifyVisibleEndpointsChanged();
+        Activity = $"已复制至 {TargetName(toTargetId)}：{copy.Name}";
+    }
+
+    public void DeployTestHtml()
+    {
+        if (SelectedEndpoint is not { } endpoint) return;
+        var index = Endpoints.IndexOf(endpoint);
+        if (index < 0) return;
+
+        if (!Directory.Exists(endpoint.RootPath))
+        {
+            Activity = $"目录不存在：{endpoint.RootPath}";
+            return;
+        }
+
+        var display = SelectedTarget is null ? ReceiverTestDisplayText() : "等待接收方生成";
+        var html = TestHtml(display);
+
+        try
+        {
+            File.WriteAllText(Path.Combine(endpoint.RootPath, "remote-test.html"), html);
+            Endpoints[index].UrlPath = "/remote-test.html";
+            Save();
+            Refresh(Endpoints[index]);
+            Activity = SelectedTarget is null
+                ? $"已部署测试页：{display}"
+                : "已部署测试页模板，接收方会生成实际平台和令牌";
+        }
+        catch (Exception ex)
+        {
+            Activity = $"部署测试页失败：{ex.Message}";
+        }
+    }
+
+    private int NextAvailablePort()
+    {
+        var usedPorts = Endpoints.Select(item => item.Port).ToHashSet();
+        var port = 8088;
+        while (usedPorts.Contains(port)) port++;
+        return port;
+    }
+
+    private void NotifyVisibleEndpointsChanged() => OnPropertyChanged(nameof(VisibleEndpoints));
 
     public void AddEndpoint(string rootPath)
     {
@@ -167,15 +262,14 @@ public sealed class AppState : INotifyPropertyChanged
             return;
         }
 
-        var usedPorts = Endpoints.Select(item => item.Port).ToHashSet();
-        var port = 8088;
-        while (usedPorts.Contains(port)) port++;
+        var port = NextAvailablePort();
 
         var endpoint = new WebEndpoint
         {
             Name = Path.GetFileName(rootPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
             RootPath = rootPath,
-            Port = port
+            Port = port,
+            TargetId = SelectedTargetId
         };
 
         if (Directory.Exists(Path.Combine(rootPath, "web")))
@@ -187,6 +281,7 @@ public sealed class AppState : INotifyPropertyChanged
         Selection = endpoint.Id;
         Save();
         Refresh(endpoint);
+        NotifyVisibleEndpointsChanged();
         Activity = $"已添加：{endpoint.Name}";
     }
 
@@ -200,8 +295,9 @@ public sealed class AppState : INotifyPropertyChanged
         Stop(endpoint);
         Endpoints.Remove(endpoint);
         Statuses.Remove(endpoint.Id);
-        Selection = Endpoints.FirstOrDefault()?.Id;
+        SyncSelectionToVisibleCategory();
         Save();
+        NotifyVisibleEndpointsChanged();
         Activity = $"已移除：{endpoint.Name}";
         OnPropertyChanged(nameof(SelectedEndpoint));
         OnPropertyChanged(nameof(SelectedStatus));
@@ -215,7 +311,7 @@ public sealed class AppState : INotifyPropertyChanged
 
     public void RefreshAll()
     {
-        var snapshot = Endpoints.ToList();
+        var snapshot = VisibleEndpoints.ToList();
         var target = SelectedTarget;
         Task.Run(() =>
         {
@@ -642,9 +738,20 @@ public sealed class AppState : INotifyPropertyChanged
 
     public void RemoveTarget(RemoteTarget target)
     {
+        for (var index = 0; index < Endpoints.Count; index++)
+        {
+            if (Endpoints[index].TargetId == target.Id)
+            {
+                Endpoints[index].TargetId = null;
+            }
+        }
+
         Targets.Remove(target);
         if (SelectedTargetId == target.Id) SelectedTargetId = null;
+        Save();
         SaveTargets();
+        SyncSelectionToVisibleCategory();
+        NotifyVisibleEndpointsChanged();
         RefreshAll();
     }
 
@@ -884,6 +991,13 @@ public sealed class AppState : INotifyPropertyChanged
             File.WriteAllBytes(target, bytes);
         }
 
+        if (payload.Files.Any(file => file.Path.Replace('\\', '/') == "remote-test.html"))
+        {
+            File.WriteAllText(
+                Path.Combine(root, "remote-test.html"),
+                TestHtml(ReceiverTestDisplayText()));
+        }
+
         var endpoint = new WebEndpoint
         {
             Id = payload.Endpoint.Id,
@@ -936,6 +1050,48 @@ public sealed class AppState : INotifyPropertyChanged
         var name = new string(chars).Trim('_');
         return string.IsNullOrEmpty(name) ? "site" : name;
     }
+
+    private string ReceiverTestDisplayText()
+    {
+        var token = ReceiverSettings.Token.Trim();
+        return $"{CurrentPlatformDisplayName()} + {(string.IsNullOrEmpty(token) ? "未设置接收令牌" : token)}";
+    }
+
+    private static string CurrentPlatformDisplayName() => "Windows";
+
+    private static string TestHtml(string display) =>
+        $$"""
+        <!doctype html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>LWM Remote Test</title>
+          <style>
+            body {
+              min-height: 100vh;
+              margin: 0;
+              display: grid;
+              place-items: center;
+              background: #f5f7fa;
+              color: #111827;
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }
+            h1 {
+              max-width: 90vw;
+              margin: 0;
+              font-size: clamp(36px, 9vw, 88px);
+              line-height: 1.05;
+              text-align: center;
+              word-break: break-word;
+            }
+          </style>
+        </head>
+        <body>
+          <h1>{{display.HtmlEscaped()}}</h1>
+        </body>
+        </html>
+        """;
 
     private (int Status, byte[] Body) EndpointResponse(WebEndpoint endpoint)
     {

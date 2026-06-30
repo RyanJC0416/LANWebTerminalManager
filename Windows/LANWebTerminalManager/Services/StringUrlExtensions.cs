@@ -15,4 +15,11 @@ public static class StringUrlExtensions
 
     public static string UrlQueryEscaped(this string value) =>
         Uri.EscapeDataString(value);
+
+    public static string HtmlEscaped(this string value) =>
+        value.Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;")
+            .Replace("\"", "&quot;")
+            .Replace("'", "&#39;");
 }
