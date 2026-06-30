@@ -1,20 +1,29 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace LANWebTerminalManager.Services;
 
 public sealed class UpdateManager : INotifyPropertyChanged
 {
-    public const string CurrentVersion = "2.0.1";
+    public const string CurrentVersion = "2.0.2";
+
+    private const string LatestReleaseApiUrl = "https://api.github.com/repos/RyanJC0416/LANWebTerminalManager/releases/latest";
+    private const string LatestReleasePageUrl = "https://github.com/RyanJC0416/LANWebTerminalManager/releases/latest";
+
+    private static readonly Regex ReleaseTagRegex = new(
+        @"/releases/tag/([^""/?#]+)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private readonly HttpClient _http = new()
     {
-        Timeout = TimeSpan.FromSeconds(20)
+        Timeout = TimeSpan.FromSeconds(90)
     };
 
     private bool _isChecking;
@@ -31,7 +40,7 @@ public sealed class UpdateManager : INotifyPropertyChanged
 
     public UpdateManager()
     {
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("LANWebTerminalManager");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("LANWebTerminalManager/2.0");
         _http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
     }
 
@@ -134,7 +143,7 @@ public sealed class UpdateManager : INotifyPropertyChanged
     {
         var url = _pendingRelease?.TagName is { } tag
             ? $"https://github.com/RyanJC0416/LANWebTerminalManager/releases/tag/{tag}"
-            : "https://github.com/RyanJC0416/LANWebTerminalManager/releases/latest";
+            : LatestReleasePageUrl;
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     }
 
@@ -163,7 +172,7 @@ public sealed class UpdateManager : INotifyPropertyChanged
                 return;
             }
 
-            var asset = release.Assets.FirstOrDefault(IsWindowsAsset);
+            var asset = SelectWindowsAsset(release.Assets);
             if (asset is null)
             {
                 ShowFailure(new InvalidOperationException("更新包里没有找到 Windows 版本。"), UpdateAction.Check);
@@ -208,26 +217,9 @@ public sealed class UpdateManager : INotifyPropertyChanged
             var tempDir = Path.Combine(updatesDir, $"LANWebTerminalManagerUpdate-{Guid.NewGuid()}");
             Directory.CreateDirectory(tempDir);
             var archivePath = Path.Combine(tempDir, "LANWebTerminalManager.zip");
+            var logPath = Path.Combine(updatesDir, "install.log");
 
-            using (var response = await _http.GetAsync(asset.BrowserDownloadUrl, HttpCompletionOption.ResponseHeadersRead))
-            {
-                response.EnsureSuccessStatusCode();
-                var total = response.Content.Headers.ContentLength ?? -1;
-                await using var input = await response.Content.ReadAsStreamAsync();
-                await using var output = File.Create(archivePath);
-                var buffer = new byte[81920];
-                long readTotal = 0;
-                int read;
-                while ((read = await input.ReadAsync(buffer)) > 0)
-                {
-                    await output.WriteAsync(buffer.AsMemory(0, read));
-                    readTotal += read;
-                    if (total > 0)
-                    {
-                        DownloadProgress = Math.Clamp((double)readTotal / total, 0, 1);
-                    }
-                }
-            }
+            await DownloadAssetAsync(asset, archivePath);
 
             DownloadProgress = 1;
             IsDownloading = false;
@@ -250,20 +242,36 @@ public sealed class UpdateManager : INotifyPropertyChanged
                 throw new InvalidOperationException("无法确定当前程序路径。");
             }
 
+            var newAppDir = Path.GetDirectoryName(newExe)
+                ?? throw new InvalidOperationException("无法确定更新包目录。");
+            var installDir = Path.GetDirectoryName(currentExe)
+                ?? throw new InvalidOperationException("无法确定安装目录。");
+
             var scriptPath = Path.Combine(tempDir, "install-update.ps1");
             var script = $$"""
                 $ErrorActionPreference = 'Stop'
+                $installDir = '{{installDir.Replace("'", "''")}}'
+                $newAppDir = '{{newAppDir.Replace("'", "''")}}'
                 $currentExe = '{{currentExe.Replace("'", "''")}}'
-                $newExe = '{{newExe.Replace("'", "''")}}'
-                $pid = {{Environment.ProcessId}}
+                $appPid = {{Environment.ProcessId}}
+                $tempDir = '{{tempDir.Replace("'", "''")}}'
+                $logPath = '{{logPath.Replace("'", "''")}}'
 
-                while (Get-Process -Id $pid -ErrorAction SilentlyContinue) {
+                Start-Transcript -Path $logPath -Append | Out-Null
+                Write-Output "[$(Get-Date -Format o)] LANWebTerminalManager updater started"
+
+                while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) {
                     Start-Sleep -Milliseconds 200
                 }
 
-                Copy-Item -Path $newExe -Destination $currentExe -Force
+                Get-ChildItem -Path $newAppDir -File | ForEach-Object {
+                    Copy-Item -Path $_.FullName -Destination (Join-Path $installDir $_.Name) -Force
+                }
+
                 Start-Process -FilePath $currentExe
-                Remove-Item -Path '{{tempDir.Replace("'", "''")}}' -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Output "[$(Get-Date -Format o)] LANWebTerminalManager updater finished"
+                Stop-Transcript | Out-Null
                 """;
             await File.WriteAllTextAsync(scriptPath, script);
 
@@ -287,30 +295,164 @@ public sealed class UpdateManager : INotifyPropertyChanged
         }
     }
 
+    private async Task DownloadAssetAsync(GitHubReleaseAsset asset, string destinationPath)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, asset.BrowserDownloadUrl);
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"下载更新包失败（HTTP {(int)response.StatusCode}）。");
+        }
+
+        var total = response.Content.Headers.ContentLength ?? -1;
+        await using var input = await response.Content.ReadAsStreamAsync();
+        await using var output = File.Create(destinationPath);
+        var buffer = new byte[81920];
+        long readTotal = 0;
+        int read;
+        while ((read = await input.ReadAsync(buffer)) > 0)
+        {
+            await output.WriteAsync(buffer.AsMemory(0, read));
+            readTotal += read;
+            if (total > 0)
+            {
+                DownloadProgress = Math.Clamp((double)readTotal / total, 0, 1);
+            }
+        }
+    }
+
     private async Task<GitHubRelease> FetchLatestReleaseAsync()
     {
+        Exception? lastError = null;
+
         for (var attempt = 0; attempt < 2; attempt++)
         {
             try
             {
-                var response = await _http.GetAsync("https://api.github.com/repos/RyanJC0416/LANWebTerminalManager/releases/latest");
-                response.EnsureSuccessStatusCode();
-                var json = await response.Content.ReadAsStringAsync();
-                return JsonSerializer.Deserialize<GitHubRelease>(json) ?? throw new InvalidOperationException("无法读取最新 release。");
+                return await FetchLatestReleaseFromApiAsync();
             }
-            catch when (attempt == 0)
+            catch (Exception ex) when (attempt == 0 && ShouldRetryReleaseLookup(ex))
             {
+                lastError = ex;
                 await Task.Delay(700);
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                break;
             }
         }
 
-        throw new InvalidOperationException("无法读取最新 release。");
+        try
+        {
+            return await FetchLatestReleaseFromRedirectPageAsync();
+        }
+        catch (Exception ex)
+        {
+            throw lastError ?? ex;
+        }
     }
 
-    private static bool IsWindowsAsset(GitHubReleaseAsset asset)
+    private async Task<GitHubRelease> FetchLatestReleaseFromApiAsync()
+    {
+        using var response = await _http.GetAsync(LatestReleaseApiUrl);
+        if (!response.IsSuccessStatusCode)
+        {
+            var detail = response.StatusCode == HttpStatusCode.Forbidden
+                ? "（可能是 GitHub API 访问受限，将尝试备用方式）"
+                : "";
+            throw new InvalidOperationException($"读取最新 release 失败（HTTP {(int)response.StatusCode}）{detail}");
+        }
+
+        var json = await response.Content.ReadAsStringAsync();
+        return JsonSerializer.Deserialize<GitHubRelease>(json) ?? throw new InvalidOperationException("无法读取最新 release。");
+    }
+
+    private async Task<GitHubRelease> FetchLatestReleaseFromRedirectPageAsync()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, LatestReleasePageUrl);
+        using var response = await _http.SendAsync(request);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"读取最新 release 页面失败（HTTP {(int)response.StatusCode}）。");
+        }
+
+        var html = await response.Content.ReadAsStringAsync();
+        var tag = ExtractReleaseTag(response.RequestMessage?.RequestUri)
+            ?? ExtractReleaseTag(response.Headers.Location)
+            ?? ExtractReleaseTagFromHtml(html);
+        if (tag is null)
+        {
+            throw new InvalidOperationException("无法解析最新 release 版本。");
+        }
+
+        var version = tag.TrimStart('v', 'V');
+        return new GitHubRelease
+        {
+            TagName = tag,
+            Assets =
+            [
+                new GitHubReleaseAsset
+                {
+                    Name = $"LANWebTerminalManager-v{version}-Windows.zip",
+                    BrowserDownloadUrl = $"https://github.com/RyanJC0416/LANWebTerminalManager/releases/download/{tag}/LANWebTerminalManager-v{version}-Windows.zip"
+                },
+                new GitHubReleaseAsset
+                {
+                    Name = "windows.zip",
+                    BrowserDownloadUrl = $"https://github.com/RyanJC0416/LANWebTerminalManager/releases/download/{tag}/windows.zip"
+                }
+            ]
+        };
+    }
+
+    private static GitHubReleaseAsset? SelectWindowsAsset(IEnumerable<GitHubReleaseAsset> assets)
+    {
+        var list = assets.ToList();
+        return list.FirstOrDefault(IsVersionedWindowsAsset)
+            ?? list.FirstOrDefault(asset => string.Equals(asset.Name, "windows.zip", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsVersionedWindowsAsset(GitHubReleaseAsset asset)
     {
         var name = asset.Name.ToLowerInvariant();
-        return name.Contains("-windows") && name.EndsWith(".zip");
+        return name.EndsWith(".zip") && name.Contains("-windows");
+    }
+
+    private static string? ExtractReleaseTag(Uri? uri)
+    {
+        if (uri is null) return null;
+
+        const string marker = "/releases/tag/";
+        var path = uri.AbsolutePath;
+        var index = path.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (index < 0) return null;
+
+        var tag = path[(index + marker.Length)..].Trim('/');
+        var slash = tag.IndexOf('/');
+        if (slash >= 0) tag = tag[..slash];
+        return string.IsNullOrWhiteSpace(tag) ? null : tag;
+    }
+
+    private static string? ExtractReleaseTagFromHtml(string html)
+    {
+        var match = ReleaseTagRegex.Match(html);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    private static bool ShouldRetryReleaseLookup(Exception error)
+    {
+        if (error is HttpRequestException httpError && httpError.StatusCode is HttpStatusCode statusCode)
+        {
+            return (int)statusCode >= 500;
+        }
+
+        if (error is InvalidOperationException invalid && invalid.Message.Contains("HTTP 5", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return error is TaskCanceledException or TimeoutException;
     }
 
     private static bool IsVersion(string lhs, string rhs)
