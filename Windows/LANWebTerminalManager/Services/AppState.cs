@@ -48,6 +48,7 @@ public sealed class AppState : INotifyPropertyChanged
         Load();
         LoadTargets();
         LoadReceiverSettings();
+        ReloadReceiverSites();
 
         if (Endpoints.Count == 0)
         {
@@ -64,6 +65,7 @@ public sealed class AppState : INotifyPropertyChanged
     }
 
     public ObservableCollection<WebEndpoint> Endpoints { get; } = new();
+    public ObservableCollection<WebEndpoint> ReceiverSites { get; } = new();
     public ObservableCollection<RemoteTarget> Targets { get; } = new();
     public Dictionary<Guid, EndpointStatus> Statuses { get; } = new();
 
@@ -100,8 +102,15 @@ public sealed class AppState : INotifyPropertyChanged
         }
     }
 
-    public WebEndpoint? SelectedEndpoint =>
-        Selection is null ? null : Endpoints.FirstOrDefault(item => item.Id == Selection);
+    public WebEndpoint? SelectedEndpoint
+    {
+        get
+        {
+            if (Selection is not Guid id) return null;
+            return Endpoints.FirstOrDefault(item => item.Id == id)
+                ?? ReceiverSites.FirstOrDefault(item => item.Id == id);
+        }
+    }
 
     public RemoteTarget? SelectedTarget =>
         SelectedTargetId is null ? null : Targets.FirstOrDefault(item => item.Id == SelectedTargetId);
@@ -110,8 +119,36 @@ public sealed class AppState : INotifyPropertyChanged
 
     public string SelectedTargetLabel => SelectedTarget?.Name ?? "local";
 
-    public IEnumerable<WebEndpoint> VisibleEndpoints =>
-        Endpoints.Where(item => item.TargetId == SelectedTargetId);
+    public IEnumerable<WebEndpoint> VisibleEndpoints
+    {
+        get
+        {
+            var owned = Endpoints.Where(item => item.TargetId == SelectedTargetId).ToList();
+            if (SelectedTargetId is not null) return owned;
+
+            var ownedIds = owned.Select(item => item.Id).ToHashSet();
+            var incoming = ReceiverSites.Where(item => !ownedIds.Contains(item.Id)).ToList();
+            return owned.Concat(incoming);
+        }
+    }
+
+    public bool IsReceiverManaged(WebEndpoint endpoint) =>
+        ReceiverSites.Any(item => item.Id == endpoint.Id);
+
+    public void ReloadReceiverSites()
+    {
+        ReceiverSites.Clear();
+        foreach (var site in LoadReceiverSites()) ReceiverSites.Add(site);
+        SyncSelectionToVisibleCategory();
+        NotifyVisibleEndpointsChanged();
+    }
+
+    public void RefreshLocalView()
+    {
+        ReloadReceiverSites();
+        RefreshAll();
+        Activity = "已刷新本地与接收方站点";
+    }
 
     public string ReceiverLocalUrl => $"http://127.0.0.1:{ReceiverSettings.Port}";
 
@@ -151,6 +188,7 @@ public sealed class AppState : INotifyPropertyChanged
     public void SelectLocalTarget()
     {
         SelectedTargetId = null;
+        ReloadReceiverSites();
         SyncSelectionToVisibleCategory();
         RefreshAll();
         Activity = "目标已切换：local";
@@ -292,11 +330,22 @@ public sealed class AppState : INotifyPropertyChanged
 
     public void Remove(WebEndpoint endpoint)
     {
-        Stop(endpoint);
-        Endpoints.Remove(endpoint);
+        Stop(endpoint, forceLocal: IsReceiverManaged(endpoint));
+        if (IsReceiverManaged(endpoint))
+        {
+            var sites = ReceiverSites.Where(item => item.Id != endpoint.Id).ToList();
+            ReceiverSites.Clear();
+            foreach (var site in sites) ReceiverSites.Add(site);
+            SaveReceiverSites(sites);
+        }
+        else
+        {
+            Endpoints.Remove(endpoint);
+            Save();
+        }
+
         Statuses.Remove(endpoint.Id);
         SyncSelectionToVisibleCategory();
-        Save();
         NotifyVisibleEndpointsChanged();
         Activity = $"已移除：{endpoint.Name}";
         OnPropertyChanged(nameof(SelectedEndpoint));
@@ -305,7 +354,15 @@ public sealed class AppState : INotifyPropertyChanged
 
     public void SaveEndpoint(WebEndpoint endpoint)
     {
-        Save();
+        if (IsReceiverManaged(endpoint))
+        {
+            SaveReceiverSites(ReceiverSites.ToList());
+        }
+        else
+        {
+            Save();
+        }
+
         Refresh(endpoint);
     }
 
@@ -320,7 +377,7 @@ public sealed class AppState : INotifyPropertyChanged
                 item => target is null ? StatusFor(item) : RemoteStatusFor(item, target));
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
-                foreach (var endpoint in Endpoints)
+                foreach (var endpoint in snapshot)
                 {
                     if (results.TryGetValue(endpoint.Id, out var status))
                     {
@@ -342,7 +399,7 @@ public sealed class AppState : INotifyPropertyChanged
             var status = target is null ? StatusFor(endpoint) : RemoteStatusFor(endpoint, target);
             System.Windows.Application.Current?.Dispatcher.Invoke(() =>
             {
-                if (Endpoints.Any(item => item.Id == endpoint.Id))
+                if (Endpoints.Any(item => item.Id == endpoint.Id) || ReceiverSites.Any(item => item.Id == endpoint.Id))
                 {
                     Statuses[endpoint.Id] = status;
                     OnPropertyChanged(nameof(SelectedStatus));
@@ -553,7 +610,7 @@ public sealed class AppState : INotifyPropertyChanged
             return;
         }
 
-        var url = status.Urls.FirstOrDefault();
+        var url = status.Urls.FirstOrDefault() ?? UrlsFor(endpoint).FirstOrDefault();
         if (url is null)
         {
             Activity = "没有可用的局域网地址";
@@ -573,8 +630,23 @@ public sealed class AppState : INotifyPropertyChanged
             return;
         }
 
-        OpenUrl(status.LocalUrl);
-        Activity = $"已打开本机地址：{status.LocalUrl}";
+        string url;
+        if (SelectedTarget is not null)
+        {
+            url = status.Urls.FirstOrDefault() ?? "";
+            if (string.IsNullOrEmpty(url))
+            {
+                Activity = "没有可用的访问地址";
+                return;
+            }
+        }
+        else
+        {
+            url = string.IsNullOrEmpty(status.LocalUrl) ? LocalUrlFor(endpoint) : status.LocalUrl;
+        }
+
+        OpenUrl(url);
+        Activity = SelectedTarget is null ? $"已打开本机地址：{url}" : $"已打开：{url}";
     }
 
     public void RevealSelectedFolder()
@@ -603,7 +675,14 @@ public sealed class AppState : INotifyPropertyChanged
         if (string.IsNullOrWhiteSpace(relative)) return;
 
         endpoint.UrlPath = "/" + relative;
-        Save();
+        if (IsReceiverManaged(endpoint))
+        {
+            SaveReceiverSites(ReceiverSites.ToList());
+        }
+        else
+        {
+            Save();
+        }
         Refresh(endpoint);
         OnPropertyChanged(nameof(SelectedEndpoint));
         Activity = $"已选择主页：{relative}";
@@ -618,13 +697,14 @@ public sealed class AppState : INotifyPropertyChanged
             return;
         }
 
-        if (status.Urls.Count == 0)
+        var urlItems = status.Urls.Count > 0 ? status.Urls : UrlsFor(endpoint);
+        if (urlItems.Count == 0)
         {
             Activity = "没有可复制的局域网地址";
             return;
         }
 
-        System.Windows.Clipboard.SetText(string.Join(Environment.NewLine, status.Urls));
+        System.Windows.Clipboard.SetText(string.Join(Environment.NewLine, urlItems));
         Activity = "已复制访问地址";
     }
 
@@ -907,6 +987,7 @@ public sealed class AppState : INotifyPropertyChanged
 
                 var endpoint = ReceiveSite(payload);
                 StartLocalSynchronously(endpoint);
+                System.Windows.Application.Current?.Dispatcher.Invoke(ReloadReceiverSites);
                 Thread.Sleep(500);
                 return EndpointResponse(endpoint);
             }
@@ -1129,6 +1210,15 @@ public sealed class AppState : INotifyPropertyChanged
 
         return files;
     }
+
+    private List<string> UrlsFor(WebEndpoint endpoint)
+    {
+        var urlPath = NormalizeUrlPath(endpoint.UrlPath);
+        return NetworkHelper.LanIps().Select(ip => BuildServiceUrl(ip, endpoint.Port, urlPath)).ToList();
+    }
+
+    private string LocalUrlFor(WebEndpoint endpoint) =>
+        BuildServiceUrl("127.0.0.1", endpoint.Port, NormalizeUrlPath(endpoint.UrlPath));
 
     private EndpointStatus StatusFor(WebEndpoint endpoint)
     {

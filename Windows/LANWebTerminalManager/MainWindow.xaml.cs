@@ -91,6 +91,14 @@ public partial class MainWindow : Window
         RefreshEndpointListVisuals();
     }
 
+    private sealed class EndpointListItem
+    {
+        public required WebEndpoint Endpoint { get; init; }
+        public bool IsReceiverManaged { get; init; }
+        public string Name => Endpoint.Name;
+        public string HostPortLabel => Endpoint.HostPortLabel;
+    }
+
     private sealed class TargetPickerItem
     {
         public required string Label { get; init; }
@@ -125,70 +133,87 @@ public partial class MainWindow : Window
         RefreshTargetPicker();
     }
 
+    private void RefreshLocalView_Click(object sender, RoutedEventArgs e)
+    {
+        _state.RefreshLocalView();
+        RefreshEndpointListSource();
+        RenderDetail();
+    }
+
     private void RefreshEndpointListSource()
     {
-        EndpointList.ItemsSource = _state.VisibleEndpoints.ToList();
+        EndpointList.ItemsSource = _state.VisibleEndpoints
+            .Select(endpoint => new EndpointListItem
+            {
+                Endpoint = endpoint,
+                IsReceiverManaged = _state.IsReceiverManaged(endpoint)
+            })
+            .ToList();
         RefreshEndpointListVisuals();
     }
 
     private void EndpointList_ContextMenuOpening(object sender, ContextMenuEventArgs e)
     {
-        if (EndpointList.SelectedItem is not WebEndpoint endpoint)
+        if (EndpointList.SelectedItem is not EndpointListItem item)
         {
             e.Handled = true;
             return;
         }
 
+        var endpoint = item.Endpoint;
         var menu = new ContextMenu();
 
-        var transferMenu = new MenuItem { Header = "转移至分类" };
-        var localTransfer = new MenuItem { Header = "local", IsEnabled = endpoint.TargetId is not null };
-        localTransfer.Click += (_, _) =>
+        if (!item.IsReceiverManaged)
         {
-            _state.TransferEndpoint(endpoint, null);
-            RefreshEndpointListSource();
-            RenderDetail();
-        };
-        transferMenu.Items.Add(localTransfer);
-        foreach (var target in _state.Targets)
-        {
-            var targetItem = new MenuItem
+            var transferMenu = new MenuItem { Header = "转移至分类" };
+            var localTransfer = new MenuItem { Header = "local", IsEnabled = endpoint.TargetId is not null };
+            localTransfer.Click += (_, _) =>
             {
-                Header = target.Name,
-                IsEnabled = endpoint.TargetId != target.Id
-            };
-            var targetId = target.Id;
-            targetItem.Click += (_, _) =>
-            {
-                _state.TransferEndpoint(endpoint, targetId);
+                _state.TransferEndpoint(endpoint, null);
                 RefreshEndpointListSource();
                 RenderDetail();
             };
-            transferMenu.Items.Add(targetItem);
-        }
-        menu.Items.Add(transferMenu);
-
-        var copyMenu = new MenuItem { Header = "复制至分类" };
-        var localCopy = new MenuItem { Header = "local" };
-        localCopy.Click += (_, _) =>
-        {
-            _state.CopyEndpoint(endpoint, null);
-            RefreshEndpointListSource();
-        };
-        copyMenu.Items.Add(localCopy);
-        foreach (var target in _state.Targets)
-        {
-            var targetItem = new MenuItem { Header = target.Name };
-            var targetId = target.Id;
-            targetItem.Click += (_, _) =>
+            transferMenu.Items.Add(localTransfer);
+            foreach (var target in _state.Targets)
             {
-                _state.CopyEndpoint(endpoint, targetId);
+                var targetItem = new MenuItem
+                {
+                    Header = target.Name,
+                    IsEnabled = endpoint.TargetId != target.Id
+                };
+                var targetId = target.Id;
+                targetItem.Click += (_, _) =>
+                {
+                    _state.TransferEndpoint(endpoint, targetId);
+                    RefreshEndpointListSource();
+                    RenderDetail();
+                };
+                transferMenu.Items.Add(targetItem);
+            }
+            menu.Items.Add(transferMenu);
+
+            var copyMenu = new MenuItem { Header = "复制至分类" };
+            var localCopy = new MenuItem { Header = "local" };
+            localCopy.Click += (_, _) =>
+            {
+                _state.CopyEndpoint(endpoint, null);
                 RefreshEndpointListSource();
             };
-            copyMenu.Items.Add(targetItem);
+            copyMenu.Items.Add(localCopy);
+            foreach (var target in _state.Targets)
+            {
+                var targetItem = new MenuItem { Header = target.Name };
+                var targetId = target.Id;
+                targetItem.Click += (_, _) =>
+                {
+                    _state.CopyEndpoint(endpoint, targetId);
+                    RefreshEndpointListSource();
+                };
+                copyMenu.Items.Add(targetItem);
+            }
+            menu.Items.Add(copyMenu);
+            menu.Items.Add(new Separator());
         }
-        menu.Items.Add(copyMenu);
-        menu.Items.Add(new Separator());
 
         var deleteItem = new MenuItem { Header = "删除" };
         deleteItem.Click += (_, _) =>
@@ -241,9 +266,9 @@ public partial class MainWindow : Window
 
     private void EndpointList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (EndpointList.SelectedItem is WebEndpoint endpoint)
+        if (EndpointList.SelectedItem is EndpointListItem item)
         {
-            _state.Selection = endpoint.Id;
+            _state.Selection = item.Endpoint.Id;
         }
 
         RenderDetail();
@@ -404,9 +429,10 @@ public partial class MainWindow : Window
       private void RefreshEndpointListVisuals()
     {
         EndpointList.Items.Refresh();
-        if (_state.SelectedEndpoint is not null)
+        if (_state.SelectedEndpoint is { } selected)
         {
-            EndpointList.SelectedItem = _state.SelectedEndpoint;
+            EndpointList.SelectedItem = EndpointList.Items.Cast<EndpointListItem>()
+                .FirstOrDefault(item => item.Endpoint.Id == selected.Id);
         }
 
         UpdateEndpointStatusDots();
@@ -417,9 +443,9 @@ public partial class MainWindow : Window
         for (var index = 0; index < EndpointList.Items.Count; index++)
         {
             if (EndpointList.ItemContainerGenerator.ContainerFromIndex(index) is not ListBoxItem container) continue;
-            if (container.Content is not WebEndpoint endpoint) continue;
+            if (container.Content is not EndpointListItem item) continue;
             if (FindVisualChild<System.Windows.Shapes.Ellipse>(container) is not { } dot) continue;
-            var running = _state.Statuses.TryGetValue(endpoint.Id, out var status) && status.Running;
+            var running = _state.Statuses.TryGetValue(item.Endpoint.Id, out var status) && status.Running;
             dot.Fill = running
                 ? (Brush)FindResource("OkBrush")
                 : new SolidColorBrush(Color.FromRgb(0xA8, 0xB0, 0xB9));
